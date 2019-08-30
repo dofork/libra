@@ -1,0 +1,11 @@
+[package]
+name = "libra"
+version = "0.0.0"
+workspace = "../../"
+edition = "2018"
+publish = false
+
+[dependencies]
+rocket = { path = "../../core/lib" }
+libra_wallet = { path = "../../../../client/libra_wallet/" }
+client = { path = "../../../../client" }

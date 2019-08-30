@@ -22,6 +22,9 @@ pub(crate) mod account_commands;
 /// Main instance of client holding corresponding information, e.g. account address.
 pub mod client_proxy;
 /// Command struct to interact with client.
+/// new client to interact with user
+pub mod client_front;
+
 pub mod commands;
 pub(crate) mod dev_commands;
 /// gRPC client wrapper to connect to validator.
