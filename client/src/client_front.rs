@@ -283,6 +283,16 @@ impl ClientFront {
         Ok(sequence_number)
     }
 
+    ///Mints coins for the receiver specified version 2
+    pub fn mint_coins_v2(&mut self,receiver_address_decoded:String,num_coins: u64, is_blocking:bool) {
+        let receiver = ClientFront::address_from_strings(receiver_address_decoded);
+        match self.faucet_account {
+            Some(_) => self.mint_coins_with_local_faucet_account(&receiver_address_decoded, num_coins, is_blocking),
+            None => self.mint_coins_with_faucet_service(&receiver_address_decoded, num_coins, is_blocking),
+        }
+    }
+
+
     /// Mints coins for the receiver specified.
     pub fn mint_coins(&mut self, space_delim_strings: &[&str], is_blocking: bool) -> Result<()> {
         ensure!(
@@ -329,7 +339,7 @@ impl ClientFront {
     {
         let mut wallet = WalletLibrary::new();
         let mnemonic = wallet.mnemonic();   // output mnemonic
-        let (address,child_number) = wallet.new_address()?;
+        let (address,_child_number) = wallet.new_address()?;
         let address_human = hex::encode(address); // output address
         let account_data = Self::get_account_data_from_address(&self.client,address,true,None)?;
         let a_user = User { wallet:wallet, accounts:vec![account_data],};
@@ -367,7 +377,7 @@ impl ClientFront {
         num_coins: u64,
         gas_unit_price: Option<u64>,
         max_gas_amount: Option<u64>,
-        is_blocking:bool,
+        _is_blocking:bool,
     ) -> Result<()>
     {
 
@@ -1012,7 +1022,7 @@ impl ClientFront {
         Ok(account)
     }
 
-    fn mint_coins_with_local_faucet_account(
+    pub fn mint_coins_with_local_faucet_account(
         &mut self,
         receiver: &AccountAddress,
         num_coins: u64,

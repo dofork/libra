@@ -7,5 +7,5 @@ publish = false
 
 [dependencies]
 rocket = { path = "../../core/lib" }
-libra_wallet = { path = "../../../../client/libra_wallet/" }
-client = { path = "../../../../client" }
+libra_wallet = { path = "../../../../libra/client/libra_wallet/" }
+client = { path = "../../../../libra/client" }
