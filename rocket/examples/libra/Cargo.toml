@@ -9,3 +9,4 @@ publish = false
 rocket = { path = "../../core/lib" }
 libra_wallet = { path = "../../../../libra/client/libra_wallet/" }
 client = { path = "../../../../libra/client" }
+failure = { path = "../../../common/failure_ext", package = "failure_ext" }

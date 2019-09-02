@@ -239,6 +239,17 @@ impl ClientFront {
     }
 
     /// Get balance from validator for the account specified.
+    pub fn get_balance_v2(&mut self,account_address_decoded:String) -> Result<u64> {
+        let address = ClientFront::address_from_strings(&account_address_decoded)?;
+        self.get_account_resource_and_update(address).map(|res| {
+            let whole_num = res.balance() / 1_000_000;
+            let remainder = res.balance() % 1_000_000;
+            //format!("{}.{:0>6}", whole_num.to_string(), remainder.to_string())
+            remainder
+        })
+    }
+
+    /// Get balance from validator for the account specified.
     pub fn get_balance(&mut self, space_delim_strings: &[&str]) -> Result<String> {
         ensure!(
             space_delim_strings.len() == 2,
@@ -284,11 +295,11 @@ impl ClientFront {
     }
 
     ///Mints coins for the receiver specified version 2
-    pub fn mint_coins_v2(&mut self,receiver_address_decoded:String,num_coins: u64, is_blocking:bool) {
-        let receiver = ClientFront::address_from_strings(receiver_address_decoded);
+    pub fn mint_coins_v2(&mut self,receiver_address_decoded:String,num_coins: u64, is_blocking:bool) -> Result<()>{
+        let receiver = ClientFront::address_from_strings(&receiver_address_decoded)?;
         match self.faucet_account {
-            Some(_) => self.mint_coins_with_local_faucet_account(&receiver_address_decoded, num_coins, is_blocking),
-            None => self.mint_coins_with_faucet_service(&receiver_address_decoded, num_coins, is_blocking),
+            Some(_) => self.mint_coins_with_local_faucet_account(&receiver, num_coins, is_blocking),
+            None => self.mint_coins_with_faucet_service(&receiver, num_coins, is_blocking),
         }
     }
 
@@ -338,9 +349,9 @@ impl ClientFront {
     pub fn create_account (&mut self) -> Result<(String,String)>
     {
         let mut wallet = WalletLibrary::new();
-        let mnemonic = wallet.mnemonic();   // output mnemonic
+        let mnemonic = wallet.mnemonic();
         let (address,_child_number) = wallet.new_address()?;
-        let address_human = hex::encode(address); // output address
+        let address_human = hex::encode(address);
         let account_data = Self::get_account_data_from_address(&self.client,address,true,None)?;
         let a_user = User { wallet:wallet, accounts:vec![account_data],};
         self.users.push(a_user);
@@ -1022,7 +1033,7 @@ impl ClientFront {
         Ok(account)
     }
 
-    pub fn mint_coins_with_local_faucet_account(
+    fn mint_coins_with_local_faucet_account(
         &mut self,
         receiver: &AccountAddress,
         num_coins: u64,

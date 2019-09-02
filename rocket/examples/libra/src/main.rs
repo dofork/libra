@@ -7,17 +7,19 @@
 
 extern crate libra_wallet;
 extern crate client;
+extern crate failure;
 
 const CLIENT_WALLET_MNEMONIC_FILE:&str = "client.mnemonic";
 use libra_wallet::{io_utils, wallet_library::WalletLibrary};
 use client::{client_front::ClientFront};
+//pub use failure::Erorr;
 
 use rocket::request::State;
 use rocket::{Request, Data, Response};
 use rocket::http::{Method, ContentType, Status};
 use std::sync::Mutex;
 
-
+//pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct User {
     /// Wallet libray managing user account
@@ -98,6 +100,12 @@ impl FrontController {
         client.mint_coins_v2(receiver_address_decoded,num_coins,true);
     }
 
+    pub fn get_balance(&self,account_address_decoded:String) -> (u64)
+    {
+        let mut client = self.client.lock().unwrap();
+        client.get_balance_v2(account_address_decoded).unwrap()
+    }
+
     pub fn transfer_coins(
         &self,sender_address : String,
         receiver_address : String,
@@ -119,13 +127,18 @@ fn create_account(controller : State<FrontController>) -> String
     format!("{{\"mnemonic\":\"{}\",\"pubkey\":\"{}\" }}", mnemonic, pubkey)
 }
 
-#[get("/mine/<receiver_address>/num_coins")]
-fn mint(controller : State<FrontController> ) -> String
+#[get("/mint/<receiver_address>/<num_coins>")]
+fn mint(controller : State<FrontController> ,receiver_address:String,num_coins:u64) -> String
 {
     controller.mint(receiver_address,num_coins);
-    "mint finished!"
+    "mint finished".to_string()
 }
 
+#[get("/get_balance/<address>")]
+fn get_balance(controller:State<FrontController>,address:String) -> String
+{
+    controller.get_balance(address).to_string()
+}
 
 #[get("/transfer_coins/<sender_address>/<receiver_address>/<coins>/<gas_unit_price>/<max_gas>")]
 fn transfer_coins(
@@ -144,5 +157,5 @@ fn transfer_coins(
 fn main() {
 
     let controller = FrontController::new();
-    rocket::ignite().manage(controller).mount("/", routes![create_account]).launch();
+    rocket::ignite().manage(controller).mount("/", routes![create_account,get_balance,mint]).launch();
 }
