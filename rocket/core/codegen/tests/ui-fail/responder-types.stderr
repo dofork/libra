@@ -1,0 +1,61 @@
+error[E0277]: the trait bound `u8: rocket::response::Responder<'_>` is not satisfied
+ --> $DIR/responder-types.rs:8:5
+  |
+8 |     thing: u8,
+  |     ^^^^^^^^^ the trait `rocket::response::Responder<'_>` is not implemented for `u8`
+  |
+  = note: required by `rocket::response::Responder::respond_to`
+
+error[E0277]: the trait bound `rocket::http::Header<'_>: std::convert::From<u8>` is not satisfied
+  --> $DIR/responder-types.rs:15:5
+   |
+15 |     other: u8,
+   |     ^^^^^^^^^ the trait `std::convert::From<u8>` is not implemented for `rocket::http::Header<'_>`
+   |
+   = help: the following implementations were found:
+             rocket::http::Header<'static> as $TRAIT
+             rocket::http::Header<'static> as $TRAIT
+             rocket::http::Header<'static> as $TRAIT
+             rocket::http::Header<'static> as $TRAIT
+           and $N others
+   = note: required because of the requirements on the impl of `std::convert::Into<rocket::http::Header<'_>>` for `u8`
+
+error[E0277]: the trait bound `u8: rocket::response::Responder<'_>` is not satisfied
+  --> $DIR/responder-types.rs:21:5
+   |
+21 |     thing: u8,
+   |     ^^^^^^^^^ the trait `rocket::response::Responder<'_>` is not implemented for `u8`
+   |
+   = note: required by `rocket::response::Responder::respond_to`
+
+error[E0277]: the trait bound `rocket::http::Header<'_>: std::convert::From<u8>` is not satisfied
+  --> $DIR/responder-types.rs:23:5
+   |
+23 |     other: u8,
+   |     ^^^^^^^^^ the trait `std::convert::From<u8>` is not implemented for `rocket::http::Header<'_>`
+   |
+   = help: the following implementations were found:
+             rocket::http::Header<'static> as $TRAIT
+             rocket::http::Header<'static> as $TRAIT
+             rocket::http::Header<'static> as $TRAIT
+             rocket::http::Header<'static> as $TRAIT
+           and $N others
+   = note: required because of the requirements on the impl of `std::convert::Into<rocket::http::Header<'_>>` for `u8`
+
+error[E0277]: the trait bound `rocket::http::Header<'_>: std::convert::From<std::string::String>` is not satisfied
+  --> $DIR/responder-types.rs:31:5
+   |
+31 |     then: String,
+   |     ^^^^^^^^^^^^ the trait `std::convert::From<std::string::String>` is not implemented for `rocket::http::Header<'_>`
+   |
+   = help: the following implementations were found:
+             rocket::http::Header<'static> as $TRAIT
+             rocket::http::Header<'static> as $TRAIT
+             rocket::http::Header<'static> as $TRAIT
+             rocket::http::Header<'static> as $TRAIT
+           and $N others
+   = note: required because of the requirements on the impl of `std::convert::Into<rocket::http::Header<'_>>` for `std::string::String`
+
+error: aborting due to 5 previous errors
+
+For more information about this error, try `rustc --explain E0277`.

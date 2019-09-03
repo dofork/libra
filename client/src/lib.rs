@@ -13,6 +13,10 @@ use types::account_address::AccountAddress;
 pub(crate) mod account_commands;
 /// Main instance of client holding corresponding information, e.g. account address.
 pub mod client_proxy;
+
+/// Main instance of client inteact with server
+pub mod client_front;
+
 /// Command struct to interact with client.
 pub mod commands;
 pub(crate) mod dev_commands;
