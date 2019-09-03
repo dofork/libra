@@ -65,7 +65,7 @@ impl FrontController {
 
         let host = "ac.testnet.libra.org";
         let port = "8000";
-        let validator_set_file = "/home/dofork/CLionProjects/rocket/examples/libra/trusted_peers.config.toml";
+        let validator_set_file = "/home/dofork/Code/libra/rocket/examples/libra/trusted_peers.config.toml";
 
         let client = Mutex::new(
             ClientFront::new(
