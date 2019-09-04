@@ -11,14 +11,14 @@ use std::{
     string::ToString,
 };
 
-use logger::LoggerType;
-use nextgen_crypto::{
+use crypto::{
     ed25519::*,
     test_utils::TEST_SEED,
     x25519::{self, X25519StaticPrivateKey, X25519StaticPublicKey},
 };
+use logger::LoggerType;
 use rand::{rngs::StdRng, SeedableRng};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tempfile::TempDir;
 use toml;
 
@@ -27,7 +27,7 @@ use proto_conv::FromProtoBytes;
 use types::transaction::{SignedTransaction, SCRIPT_HASH_LENGTH};
 
 use crate::{
-    config::ConsensusProposerType::{FixedProposer, RotatingProposer},
+    config::ConsensusProposerType::{FixedProposer, MultipleOrderedProposers, RotatingProposer},
     seed_peers::{SeedPeersConfig, SeedPeersConfigHelpers},
     trusted_peers::{
         deserialize_key, deserialize_opt_key, serialize_key, serialize_opt_key,
@@ -86,32 +86,14 @@ pub struct NodeConfig {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct BaseConfig {
-    pub peer_id: String,
-    pub role: String,
-    // peer_keypairs contains all the node's private keys,
-    // it is filled later on from a different file
-    #[serde(skip)]
-    pub peer_keypairs: KeyPairs,
-    // peer_keypairs_file contains the configuration file containing all the node's private keys.
-    pub peer_keypairs_file: PathBuf,
     pub data_dir_path: PathBuf,
     #[serde(skip)]
     temp_data_dir: Option<TempDir>,
-    //TODO move set of trusted peers into genesis file
-    pub trusted_peers_file: String,
-    #[serde(skip)]
-    pub trusted_peers: TrustedPeersConfig,
-
-    // Size of chunks to request when performing restart sync to catchup
-    pub node_sync_batch_size: u64,
-
     // Number of retries per chunk download
     pub node_sync_retries: usize,
-
     // Buffer size for sync_channel used for node syncing (number of elements that it can
     // hold before it blocks on sends)
     pub node_sync_channel_buffer_size: u64,
-
     // chan_size of slog async drain for node logging.
     pub node_async_log_chan_size: usize,
 }
@@ -119,19 +101,66 @@ pub struct BaseConfig {
 impl Default for BaseConfig {
     fn default() -> BaseConfig {
         BaseConfig {
-            peer_id: "".to_string(),
-            role: "validator".to_string(),
-            peer_keypairs_file: PathBuf::from("peer_keypairs.config.toml"),
-            peer_keypairs: KeyPairs::default(),
             data_dir_path: PathBuf::from("<USE_TEMP_DIR>"),
             temp_data_dir: None,
-            trusted_peers_file: "trusted_peers.config.toml".to_string(),
-            trusted_peers: TrustedPeersConfig::default(),
-            node_sync_batch_size: 1000,
             node_sync_retries: 7,
             node_sync_channel_buffer_size: 10,
             node_async_log_chan_size: 256,
         }
+    }
+}
+
+#[derive(Debug)]
+#[cfg_attr(any(test, feature = "testing"), derive(Clone))]
+enum ConsensusPrivateKey {
+    Present(Ed25519PrivateKey),
+    Removed,
+    Absent,
+}
+
+impl ConsensusPrivateKey {
+    pub fn take(&mut self) -> Option<Ed25519PrivateKey> {
+        match self {
+            ConsensusPrivateKey::Present(_) => {
+                let key = std::mem::replace(self, ConsensusPrivateKey::Removed);
+                match key {
+                    ConsensusPrivateKey::Present(priv_key) => Some(priv_key),
+                    _ => unreachable!(),
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn get(&self) -> Option<&Ed25519PrivateKey> {
+        match self {
+            ConsensusPrivateKey::Present(key) => Some(key),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for ConsensusPrivateKey {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            ConsensusPrivateKey::Present(key) => serialize_key(key, serializer),
+            _ => serializer.serialize_str(""),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ConsensusPrivateKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<ConsensusPrivateKey, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Note: Any error in parsing is assumed to be due to the private key being absent.
+        deserialize_key(deserializer)
+            .map(ConsensusPrivateKey::Present)
+            .or_else(|_| Ok(ConsensusPrivateKey::Absent))
     }
 }
 
@@ -154,12 +183,10 @@ pub struct KeyPairs {
     #[serde(deserialize_with = "deserialize_key")]
     network_identity_public_key: X25519StaticPublicKey,
 
+    consensus_private_key: ConsensusPrivateKey,
     #[serde(serialize_with = "serialize_opt_key")]
     #[serde(deserialize_with = "deserialize_opt_key")]
-    consensus_private_key: Option<Ed25519PrivateKey>,
-    #[serde(serialize_with = "serialize_key")]
-    #[serde(deserialize_with = "deserialize_key")]
-    consensus_public_key: Ed25519PublicKey,
+    consensus_public_key: Option<Ed25519PublicKey>,
 }
 
 // required for serialization
@@ -174,8 +201,8 @@ impl Default for KeyPairs {
             network_signing_public_key: net_public_sig,
             network_identity_private_key: private_kex,
             network_identity_public_key: public_kex,
-            consensus_private_key: Some(consensus_private_sig),
-            consensus_public_key: consensus_public_sig,
+            consensus_private_key: ConsensusPrivateKey::Present(consensus_private_sig),
+            consensus_public_key: Some(consensus_public_sig),
         }
     }
 }
@@ -210,13 +237,21 @@ impl KeyPairs {
             private_keys.get_key_triplet();
         let network_signing_public_key = (&network_signing_private_key).into();
         let network_identity_public_key = (&network_identity_private_key).into();
-        let consensus_public_key = (&consensus_private_key).into();
+        let (consensus_private_key, consensus_public_key) = {
+            match consensus_private_key {
+                Some(private_key) => {
+                    let public_key = (&private_key).into();
+                    (ConsensusPrivateKey::Present(private_key), Some(public_key))
+                }
+                None => (ConsensusPrivateKey::Absent, None),
+            }
+        };
         Self {
             network_signing_private_key: Some(network_signing_private_key),
             network_signing_public_key,
             network_identity_private_key,
             network_identity_public_key,
-            consensus_private_key: Some(consensus_private_key),
+            consensus_private_key,
             consensus_public_key,
         }
     }
@@ -231,13 +266,13 @@ impl KeyPairs {
     pub fn get_network_identity_private(&self) -> X25519StaticPrivateKey {
         self.network_identity_private_key.clone()
     }
-    pub fn get_consensus_private(&self) -> &Option<Ed25519PrivateKey> {
-        &self.consensus_private_key
+    pub fn get_consensus_private(&self) -> Option<&Ed25519PrivateKey> {
+        self.consensus_private_key.get()
     }
 
     /// Beware, this destroys the private key from this NodeConfig
     pub fn take_consensus_private(&mut self) -> Option<Ed25519PrivateKey> {
-        std::mem::replace(&mut self.consensus_private_key, None)
+        self.consensus_private_key.take()
     }
     // getters for public keys
     pub fn get_network_signing_public(&self) -> &Ed25519PublicKey {
@@ -246,7 +281,7 @@ impl KeyPairs {
     pub fn get_network_identity_public(&self) -> &X25519StaticPublicKey {
         &self.network_identity_public_key
     }
-    pub fn get_consensus_public(&self) -> &Ed25519PublicKey {
+    pub fn get_consensus_public(&self) -> &Option<Ed25519PublicKey> {
         &self.consensus_public_key
     }
     // getters for keypairs
@@ -258,52 +293,39 @@ impl KeyPairs {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RoleType {
     Validator,
     FullNode,
 }
 
+impl<T> std::convert::From<T> for RoleType
+where
+    T: AsRef<str>,
+{
+    fn from(t: T) -> RoleType {
+        match t.as_ref() {
+            "validator" => RoleType::Validator,
+            "full_node" => RoleType::FullNode,
+            _ => unimplemented!("Invalid node role: {}", t.as_ref()),
+        }
+    }
+}
+
 impl BaseConfig {
     /// Constructs a new BaseConfig with an empty temp directory
     pub fn new(
-        peer_id: String,
-        role: String,
-        peer_keypairs: KeyPairs,
-        peer_keypairs_file: PathBuf,
         data_dir_path: PathBuf,
-        trusted_peers_file: String,
-        trusted_peers: TrustedPeersConfig,
-
-        node_sync_batch_size: u64,
-
         node_sync_retries: usize,
-
         node_sync_channel_buffer_size: u64,
-
         node_async_log_chan_size: usize,
     ) -> Self {
         BaseConfig {
-            peer_id,
-            role,
-            peer_keypairs,
-            peer_keypairs_file,
             data_dir_path,
             temp_data_dir: None,
-            trusted_peers_file,
-            trusted_peers,
-            node_sync_batch_size,
             node_sync_retries,
             node_sync_channel_buffer_size,
             node_async_log_chan_size,
-        }
-    }
-
-    pub fn get_role(&self) -> RoleType {
-        match self.role.as_str() {
-            "validator" => RoleType::Validator,
-            "full_node" => RoleType::FullNode,
-            &_ => unimplemented!("Invalid node role: {}", self.role),
         }
     }
 }
@@ -312,15 +334,8 @@ impl BaseConfig {
 impl Clone for BaseConfig {
     fn clone(&self) -> Self {
         Self {
-            peer_id: self.peer_id.clone(),
-            role: self.role.clone(),
-            peer_keypairs: self.peer_keypairs.clone(),
-            peer_keypairs_file: self.peer_keypairs_file.clone(),
             data_dir_path: self.data_dir_path.clone(),
             temp_data_dir: None,
-            trusted_peers_file: self.trusted_peers_file.clone(),
-            trusted_peers: self.trusted_peers.clone(),
-            node_sync_batch_size: self.node_sync_batch_size,
             node_sync_retries: self.node_sync_retries,
             node_sync_channel_buffer_size: self.node_sync_channel_buffer_size,
             node_async_log_chan_size: self.node_async_log_chan_size,
@@ -498,12 +513,10 @@ impl Default for StorageConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct NetworkConfig {
-    pub seed_peers_file: String,
-    #[serde(skip)]
-    pub seed_peers: SeedPeersConfig,
+    pub peer_id: String,
     // TODO: Add support for multiple listen/advertised addresses in config.
     // The address that this node is listening on for new connections.
     pub listen_address: Multiaddr,
@@ -512,18 +525,60 @@ pub struct NetworkConfig {
     pub discovery_interval_ms: u64,
     pub connectivity_check_interval_ms: u64,
     pub enable_encryption_and_authentication: bool,
+    pub role: String,
+    // peer_keypairs contains all the node's private keys,
+    // it is filled later on from peer_keypairs_file.
+    #[serde(skip)]
+    pub peer_keypairs: KeyPairs,
+    pub peer_keypairs_file: PathBuf,
+    // trusted peers are the nodes allowed to connect when the network is started in permissioned
+    // mode.
+    #[serde(skip)]
+    pub trusted_peers: TrustedPeersConfig,
+    pub trusted_peers_file: PathBuf,
+    // seed_peers act as seed nodes for the discovery protocol.
+    #[serde(skip)]
+    pub seed_peers: SeedPeersConfig,
+    pub seed_peers_file: PathBuf,
 }
 
 impl Default for NetworkConfig {
     fn default() -> NetworkConfig {
         NetworkConfig {
-            seed_peers_file: "seed_peers.config.toml".to_string(),
-            seed_peers: SeedPeersConfig::default(),
+            peer_id: "".to_string(),
+            role: "validator".to_string(),
             listen_address: "/ip4/0.0.0.0/tcp/6180".parse::<Multiaddr>().unwrap(),
             advertised_address: "/ip4/127.0.0.1/tcp/6180".parse::<Multiaddr>().unwrap(),
             discovery_interval_ms: 1000,
             connectivity_check_interval_ms: 5000,
             enable_encryption_and_authentication: true,
+            peer_keypairs_file: PathBuf::from("peer_keypairs.config.toml"),
+            peer_keypairs: KeyPairs::default(),
+            trusted_peers_file: PathBuf::from("trusted_peers.config.toml"),
+            trusted_peers: TrustedPeersConfig::default(),
+            seed_peers_file: PathBuf::from("seed_peers.config.toml"),
+            seed_peers: SeedPeersConfig::default(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl Clone for NetworkConfig {
+    fn clone(&self) -> Self {
+        Self {
+            peer_id: self.peer_id.clone(),
+            listen_address: self.listen_address.clone(),
+            advertised_address: self.advertised_address.clone(),
+            discovery_interval_ms: self.discovery_interval_ms,
+            connectivity_check_interval_ms: self.connectivity_check_interval_ms,
+            enable_encryption_and_authentication: self.enable_encryption_and_authentication,
+            role: self.role.clone(),
+            peer_keypairs: self.peer_keypairs.clone(),
+            peer_keypairs_file: self.peer_keypairs_file.clone(),
+            seed_peers: self.seed_peers.clone(),
+            seed_peers_file: self.seed_peers_file.clone(),
+            trusted_peers: self.trusted_peers.clone(),
+            trusted_peers_file: self.trusted_peers_file.clone(),
         }
     }
 }
@@ -542,7 +597,7 @@ impl Default for ConsensusConfig {
     fn default() -> ConsensusConfig {
         ConsensusConfig {
             max_block_size: 100,
-            proposer_type: "rotating_proposer".to_string(),
+            proposer_type: "multiple_ordered_proposers".to_string(),
             contiguous_rounds: 2,
             max_pruned_blocks_in_mem: None,
             pacemaker_initial_timeout_ms: None,
@@ -550,12 +605,14 @@ impl Default for ConsensusConfig {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub enum ConsensusProposerType {
     // Choose the smallest PeerId as the proposer
     FixedProposer,
     // Round robin rotation of proposers
     RotatingProposer,
+    // Multiple ordered proposers per round (primary, secondary, etc.)
+    MultipleOrderedProposers,
 }
 
 impl ConsensusConfig {
@@ -563,6 +620,7 @@ impl ConsensusConfig {
         match self.proposer_type.as_str() {
             "fixed_proposer" => FixedProposer,
             "rotating_proposer" => RotatingProposer,
+            "multiple_ordered_proposers" => MultipleOrderedProposers,
             &_ => unimplemented!("Invalid proposer type: {}", self.proposer_type),
         }
     }
@@ -622,15 +680,26 @@ impl Default for MempoolConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct StateSyncConfig {
-    pub address: String,
-    pub service_port: u16,
+    // Size of chunk to request for state synchronization
+    pub chunk_limit: u64,
+    // interval used for checking state synchronization progress
+    pub tick_interval_ms: u64,
+    // default timeout used for long polling to remote peer
+    pub long_poll_timeout_ms: u64,
+    // valid maximum chunk limit for sanity check
+    pub max_chunk_limit: u64,
+    // valid maximum timeout limit for sanity check
+    pub max_timeout_ms: u64,
 }
 
 impl Default for StateSyncConfig {
     fn default() -> Self {
         Self {
-            address: "localhost".to_string(),
-            service_port: 6186,
+            chunk_limit: 1000,
+            tick_interval_ms: 10,
+            long_poll_timeout_ms: 30000,
+            max_chunk_limit: 1000,
+            max_timeout_ms: 120_000,
         }
     }
 }
@@ -658,21 +727,21 @@ impl NodeConfig {
         let mut config = Self::load_template(&path)?;
         // Allow peer_id override if set
         if let Some(peer_id) = peer_id {
-            config.base.peer_id = peer_id;
+            config.network.peer_id = peer_id;
         }
-        if !config.base.trusted_peers_file.is_empty() {
-            config.base.trusted_peers = TrustedPeersConfig::load_config(
+        if !config.network.trusted_peers_file.as_os_str().is_empty() {
+            config.network.trusted_peers = TrustedPeersConfig::load_config(
                 path.as_ref()
-                    .with_file_name(&config.base.trusted_peers_file),
+                    .with_file_name(&config.network.trusted_peers_file),
             );
         }
-        if !config.base.peer_keypairs_file.as_os_str().is_empty() {
-            config.base.peer_keypairs = KeyPairs::load_config(
+        if !config.network.peer_keypairs_file.as_os_str().is_empty() {
+            config.network.peer_keypairs = KeyPairs::load_config(
                 path.as_ref()
-                    .with_file_name(&config.base.peer_keypairs_file),
+                    .with_file_name(&config.network.peer_keypairs_file),
             );
         }
-        if !config.network.seed_peers_file.is_empty() {
+        if !config.network.seed_peers_file.as_os_str().is_empty() {
             config.network.seed_peers = SeedPeersConfig::load_config(
                 path.as_ref()
                     .with_file_name(&config.network.seed_peers_file),
@@ -705,7 +774,7 @@ impl NodeConfig {
 
     /// Returns the peer info for this node
     pub fn own_addrs(&self) -> (String, Vec<Multiaddr>) {
-        let own_peer_id = self.base.peer_id.clone();
+        let own_peer_id = self.network.peer_id.clone();
         let own_addrs = vec![self.network.advertised_address.clone()];
         (own_peer_id, own_addrs)
     }
@@ -763,13 +832,14 @@ impl NodeConfigHelpers {
         let (mut peers_private_keys, trusted_peers_test) =
             TrustedPeersConfigHelpers::get_test_config(1, None);
         let peer_id = trusted_peers_test.peers.keys().collect::<Vec<_>>()[0];
-        config.base.peer_id = peer_id.clone();
+        // Setup node's peer id.
+        config.network.peer_id = peer_id.clone();
         // load node's keypairs
         let private_keys = peers_private_keys.remove_entry(peer_id.as_str()).unwrap().1;
-        config.base.peer_keypairs = KeyPairs::load(private_keys);
-        config.base.trusted_peers = trusted_peers_test;
+        config.network.peer_keypairs = KeyPairs::load(private_keys);
+        config.network.trusted_peers = trusted_peers_test;
         config.network.seed_peers = SeedPeersConfigHelpers::get_test_config(
-            &config.base.trusted_peers,
+            &config.network.trusted_peers,
             get_tcp_port(&config.network.advertised_address),
         );
         NodeConfigHelpers::update_data_dir_path_if_needed(&mut config, ".")
@@ -823,7 +893,6 @@ impl NodeConfigHelpers {
         config.mempool.mempool_service_port = get_available_port();
         config.network.advertised_address = randomize_tcp_port(&config.network.advertised_address);
         config.network.listen_address = randomize_tcp_port(&config.network.listen_address);
-        config.state_sync.service_port = get_available_port();
         config.secret_service.secret_service_port = get_available_port();
         config.storage.port = get_available_port();
     }

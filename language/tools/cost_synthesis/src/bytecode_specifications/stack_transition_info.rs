@@ -227,7 +227,10 @@ pub fn call_details(op: &Bytecode) -> Vec<CallDetails> {
             empty() => ref_values(1),
             empty() => ref_resources(1)
         },
-        Bytecode::BorrowLoc(_) | Bytecode::BorrowField(_) => {
+        Bytecode::MutBorrowLoc(_)
+        | Bytecode::ImmBorrowLoc(_)
+        | Bytecode::ImmBorrowField(_)
+        | Bytecode::MutBorrowField(_) => {
             type_transition! { empty() => ref_values(1), empty() => ref_resources(1) }
         }
         Bytecode::ReadRef => type_transition! { ref_values(1) => values(1) },
@@ -274,12 +277,10 @@ pub fn call_details(op: &Bytecode) -> Vec<CallDetails> {
         Bytecode::GetTxnSenderAddress => type_transition! { empty() => simple_addrs(1) },
         Bytecode::Exists(_, _) => type_transition! { simple_addrs(1) => bools(1) },
         Bytecode::BorrowGlobal(_, _) => type_transition! { simple_addrs(1) => ref_values(1) },
-        Bytecode::ReleaseRef => type_transition! { ref_values(1) => empty() },
         Bytecode::MoveFrom(_, _) => type_transition! { simple_addrs(1) => values(1) },
         Bytecode::MoveToSender(_, _) => type_transition! { values(1) => empty() },
         Bytecode::CreateAccount => type_transition! { simple_addrs(1) => empty() },
         Bytecode::GetTxnPublicKey => type_transition! { empty() => byte_arrays(1) },
         Bytecode::FreezeRef => type_transition! { ref_values(1) => ref_values(1) },
-        Bytecode::EmitEvent => unimplemented!(),
     }
 }

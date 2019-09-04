@@ -20,11 +20,11 @@ use strum_macros::{AsRefStr, EnumIter};
 pub(crate) enum LedgerCounter {
     EventsCreated = 101,
 
-    StateBlobsCreated = 201,
-    StateBlobsRetired = 202,
+    NewStateLeaves = 201,
+    StaleStateLeaves = 202,
 
-    StateNodesCreated = 301,
-    StateNodesRetired = 302,
+    NewStateNodes = 301,
+    StaleStateNodes = 302,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]

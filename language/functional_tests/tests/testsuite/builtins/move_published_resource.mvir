@@ -10,7 +10,7 @@ module TestMoveFrom {
       return move(yes);
     }
 
-    public increment() {
+    public increment() acquires Counter {
       let sender_address: address;
       let t_ref: &mut Self.Counter;
       let counter_ref: &mut u64;
@@ -18,7 +18,7 @@ module TestMoveFrom {
       sender_address = get_txn_sender();
       t_ref = borrow_global<Counter>(move(sender_address));
       counter_ref = &mut copy(t_ref).i;
-      release(move(t_ref));
+      _ = move(t_ref);
       *move(counter_ref) = *copy(counter_ref) + 1;
 
       return;
@@ -33,7 +33,7 @@ module TestMoveFrom {
       return;
     }
 
-    public unpublish() {
+    public unpublish() acquires Counter {
       let sender_address: address;
       let counter: Self.Counter;
       let i: u64;

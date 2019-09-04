@@ -8,14 +8,14 @@ use crate::{
     common_transactions::{create_account_txn, peer_to_peer_txn, rotate_key_txn},
     executor::FakeExecutor,
 };
+use crypto::ed25519::compat;
 use lazy_static::lazy_static;
-use nextgen_crypto::ed25519::compat;
 use types::{account_address::AccountAddress, transaction::SignedTransaction};
 
 /// The gas each transaction is configured to reserve. If the gas available in the account,
 /// converted to microlibra, falls below this threshold, transactions are expected to fail with
 /// an insufficient balance.
-pub const TXN_RESERVED: u64 = 100_000;
+pub const TXN_RESERVED: u64 = 140_000;
 
 lazy_static! {
     /// The gas cost of a create-account transaction.

@@ -1,7 +1,67 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
+
+//! This module implements [`JellyfishMerkleTree`] backed by storage module. The tree itself doesn't
+//! persist anything, but realizes the logic of R/W only. The write path will produce all the
+//! intermediate results in a batch for storage layer to commit and the read path will return
+//! results directly. The public APIs are only [`new`](JellyfishMerkleTree::new),
+//! [`put_blob_sets`](JellyfishMerkleTree::put_blob_sets),
+//! [`put_blob_set`](JellyfishMerkleTree::put_blob_set) and
+//! [`get_with_proof`](JellyfishMerkleTree::get_with_proof). After each put with a `blob_set`
+//! based on a known version, the tree will return a new root hash with a [`TreeUpdateBatch`]
+//! containing all the new nodes and indices of stale nodes.
+//!
+//! A Jellyfish Merkle Tree itself logically is a 256-bit sparse Merkle tree with an optimization
+//! that any subtree containing 0 or 1 leaf node will be replaced by that leaf node or a placeholder
+//! node with default hash value. With this optimization we can save CPU by avoiding hashing on
+//! many sparse levels in the tree. Physically, the tree is structurally similar to the modified
+//! Patricia Merkle tree of Ethereum but with some modifications. A standard Jellyfish Merkle tree
+//! will look like the following figure:
+//!                                    .──────────────────────.
+//!                            _.─────'                        `──────.
+//!                       _.──'                                        `───.
+//!                   _.─'                                                  `──.
+//!               _.─'                                                          `──.
+//!             ,'                                                                  `.
+//!          ,─'                                                                      '─.
+//!        ,'                                                                            `.
+//!      ,'                                                                                `.
+//!     ╱                                                                                    ╲
+//!    ╱                                                                                      ╲
+//!   ╱                                                                                        ╲
+//!  ╱                                                                                          ╲
+//! ;                                                                                            :
+//! ;                                                                                            :
+//!;                                                                                              :
+//!│                                                                                              │
+//!+──────────────────────────────────────────────────────────────────────────────────────────────+
+//! .''.  .''.  .''.  .''.  .''.  .''.  .''.  .''.  .''.  .''.  .''.  .''.  .''.  .''.  .''.  .''.
+//!/    \/    \/    \/    \/    \/    \/    \/    \/    \/    \/    \/    \/    \/    \/    \/    \
+//!+----++----++----++----++----++----++----++----++----++----++----++----++----++----++----++----+
+//! (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (
+//!  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )
+//! (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (
+//!  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )
+//! (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (
+//!  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )
+//! (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (
+//!  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )  )
+//! (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (  (
+//! ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■  ■
+//! ■: account_state_blob
+//!
+//! A Jellyfish Merkle Tree consists of [`Internal`] node and [`Leaf`] node. [`Internal`] node is
+//! like branch node in ethereum patricia merkle with 16 children to represent a 4-level binary
+//! tree and [`Leaf`] node is similar to that in patricia merkle too. In the above figure, each
+//! `bell` in the jellyfish is an [`Internal`] node while each tentacle is a [`Leaf`] node. It is
+//! noted that Jellyfish merkle doesn't have a counterpart for `extension` node of ethereum patricia
+//! merkle.
+//! [Internal]: crate::node_type::Internal
+//! [Leaf]: crate::node_type::Leaf
+
 #![allow(clippy::unit_arg)]
 
+pub mod iterator;
 #[cfg(test)]
 mod jellyfish_merkle_test;
 #[cfg(test)]
@@ -15,12 +75,9 @@ use failure::prelude::*;
 use nibble::{skip_common_prefix, NibbleIterator, NibblePath};
 use node_type::{Child, Children, InternalNode, LeafNode, Node, NodeKey};
 use proptest_derive::Arbitrary;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use tree_cache::TreeCache;
-use types::{
-    account_state_blob::AccountStateBlob, proof::definition::SparseMerkleProof,
-    transaction::Version,
-};
+use types::{account_state_blob::AccountStateBlob, proof::SparseMerkleProof, transaction::Version};
 
 /// The hardcoded maximum height of a [`JellyfishMerkleTree`] in nibbles.
 const ROOT_NIBBLE_HEIGHT: usize = HashValue::LENGTH * 2;
@@ -33,9 +90,9 @@ pub trait TreeReader {
 }
 
 /// Node batch that will be written into db atomically with other batches.
-pub type NodeBatch = HashMap<NodeKey, Node>;
+pub type NodeBatch = BTreeMap<NodeKey, Node>;
 /// [`RetireNodeIndex`] batch that will be written into db atomically with other batches.
-pub type StaleNodeIndexBatch = HashSet<StaleNodeIndex>;
+pub type StaleNodeIndexBatch = BTreeSet<StaleNodeIndex>;
 
 /// Indicates a node becomes stale since `stale_since_version`.
 #[derive(Arbitrary, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -74,19 +131,20 @@ where
     }
 
     /// This is a convenient function that calls
-    /// [`put_blob_set`](JellyfishMerkleTree::put_blob_set) with a single `keyed_blob_set`.
+    /// [`put_blob_sets`](JellyfishMerkleTree::put_blob_sets) with a single `keyed_blob_set`.
+    #[cfg(test)]
     pub fn put_blob_set(
         &self,
         blob_set: Vec<(HashValue, AccountStateBlob)>,
         version: Version,
     ) -> Result<(HashValue, TreeUpdateBatch)> {
-        let (mut root_hashes, tree_update_batch) = self.put_blob_sets(vec![blob_set], version)?;
-        let root_hash = root_hashes.pop().expect("root hash must exist");
-        assert!(
-            root_hashes.is_empty(),
-            "root_hashes can only have 1 root hash inside"
+        let (root_hashes, tree_update_batch) = self.put_blob_sets(vec![blob_set], version)?;
+        assert_eq!(
+            root_hashes.len(),
+            1,
+            "root_hashes must consist of a single value.",
         );
-        Ok((root_hash, tree_update_batch))
+        Ok((root_hashes[0], tree_update_batch))
     }
 
     /// Returns the new nodes and account state blobs in a batch after applying `blob_set`. For

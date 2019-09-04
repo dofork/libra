@@ -10,7 +10,7 @@ edition = "2018"
 lazy_static = "1.2.0"
 num = "0.2.0"
 num-traits = "0.2"
-rust_decimal = "1.0.1"
+rust_decimal = "1.0.2"
 statistical = "1"
 rusty-fork = "0.2.1"
 
@@ -22,4 +22,7 @@ cli = { path = "../client", package="client" }
 generate_keypair = { path = "../config/generate_keypair" }
 libra_swarm = { path = "../libra_swarm", features = ["testing"]}
 logger = { path = "../common/logger" }
+config = { path = "../config" }
+config_builder = { path = "../config/config_builder" }
 tempfile = "3.1.0"
+crypto = { path = "../crypto/crypto" }

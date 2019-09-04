@@ -20,13 +20,12 @@ ttl_cache = "0.4.2"
 
 bounded-executor = { path = "../common/bounded-executor" }
 config = { path = "../config" }
-crypto = { path = "../crypto/legacy_crypto" }
 failure = { path = "../common/failure_ext", package = "failure_ext" }
 grpc_helpers = { path = "../common/grpc_helpers" }
 logger = { path = "../common/logger" }
 metrics = { path = "../common/metrics" }
 network = { path = "../network" }
-nextgen_crypto = { path = "../crypto/nextgen_crypto" }
+crypto = { path = "../crypto/crypto" }
 proto_conv = { path = "../common/proto_conv" }
 storage_client = { path = "../storage/storage_client" }
 types = { path = "../types" }

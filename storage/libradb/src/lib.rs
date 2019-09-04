@@ -40,20 +40,19 @@ use crate::{
     system_store::SystemStore,
     transaction_store::TransactionStore,
 };
-use crypto::{hash::CryptoHash, HashValue};
+use crypto::{ed25519::*, hash::CryptoHash, HashValue};
 use failure::prelude::*;
 use itertools::{izip, zip_eq};
 use lazy_static::lazy_static;
 use logger::prelude::*;
 use metrics::OpMetrics;
-use nextgen_crypto::ed25519::*;
 use schemadb::{ColumnFamilyOptions, ColumnFamilyOptionsMap, DB, DEFAULT_CF_NAME};
-use std::{iter::Iterator, path::Path, sync::Arc, time::Instant};
-use storage_proto::ExecutorStartupInfo;
+use std::{convert::TryInto, iter::Iterator, path::Path, sync::Arc, time::Instant};
+use storage_proto::StartupInfo;
 use types::{
     access_path::AccessPath,
     account_address::AccountAddress,
-    account_config::get_account_resource_or_default,
+    account_config::{get_account_resource_or_default, AccountResource},
     account_state_blob::{AccountStateBlob, AccountStateWithProof},
     contract_event::EventWithProof,
     get_with_proof::{RequestItem, ResponseItem},
@@ -95,7 +94,7 @@ pub struct LibraDB {
 
 impl LibraDB {
     /// Config parameter for the pruner.
-    const NUM_HISTORICAL_VERSIONS_TO_KEEP: u64 = 1_000_000;
+    const NUM_HISTORICAL_VERSIONS_TO_KEEP: u64 = u64::max_value();
 
     /// This creates an empty LibraDB instance on disk or opens one if it already exists.
     pub fn new<P: AsRef<Path> + Clone>(db_root_path: P) -> Self {
@@ -105,7 +104,7 @@ impl LibraDB {
                 ColumnFamilyOptions::default(),
             ),
             (EVENT_ACCUMULATOR_CF_NAME, ColumnFamilyOptions::default()),
-            (EVENT_BY_ACCESS_PATH_CF_NAME, ColumnFamilyOptions::default()),
+            (EVENT_BY_KEY_CF_NAME, ColumnFamilyOptions::default()),
             (EVENT_CF_NAME, ColumnFamilyOptions::default()),
             (
                 JELLYFISH_MERKLE_NODE_CF_NAME,
@@ -185,26 +184,36 @@ impl LibraDB {
         ))
     }
 
-    /// Returns events specified by `access_path` with sequence number in range designated by
+    /// Returns events specified by `query_path` with sequence number in range designated by
     /// `start_seq_num`, `ascending` and `limit`. If ascending is true this query will return up to
-    /// `limit` events that were emitted after `start_event_seq_num`. Otherwise it will return up to
-    /// `limit` events in the reverse order. Both cases are inclusive.
+    /// `limit` events that were emitted after `start_event_seq_num`. Otherwise, it will return up
+    /// to `limit` events in the reverse order. Both cases are inclusive.
     fn get_events_by_event_access_path(
         &self,
-        access_path: &AccessPath,
+        query_path: &AccessPath,
         start_seq_num: u64,
         ascending: bool,
         limit: u64,
         ledger_version: Version,
-    ) -> Result<(Vec<EventWithProof>, Option<AccountStateWithProof>)> {
+    ) -> Result<(Vec<EventWithProof>, AccountStateWithProof)> {
         error_if_too_many_requested(limit, MAX_LIMIT)?;
 
         let get_latest = !ascending && start_seq_num == u64::max_value();
+        let account_state =
+            self.get_account_state_with_proof(query_path.address, ledger_version, ledger_version)?;
+        let account_resource = if let Some(account_blob) = &account_state.blob {
+            AccountResource::make_from(&(&account_blob.try_into()?))?
+        } else {
+            bail!("Nothing stored under address: {}", query_path.address);
+        };
+        let event_key = account_resource
+            .get_event_handle_by_query_path(query_path)?
+            .key();
         let cursor = if get_latest {
             // Caller wants the latest, figure out the latest seq_num.
             // In the case of no events on that path, use 0 and expect empty result below.
             self.event_store
-                .get_latest_sequence_number(ledger_version, access_path)?
+                .get_latest_sequence_number(ledger_version, event_key)?
                 .unwrap_or(0)
         } else {
             start_seq_num
@@ -214,8 +223,8 @@ impl LibraDB {
         let (first_seq, real_limit) = get_first_seq_num_and_limit(ascending, cursor, limit)?;
 
         // Query the index.
-        let mut event_keys = self.event_store.lookup_events_by_access_path(
-            access_path,
+        let mut event_keys = self.event_store.lookup_events_by_key(
+            &event_key,
             first_seq,
             real_limit,
             ledger_version,
@@ -258,27 +267,9 @@ impl LibraDB {
             events_with_proof.reverse();
         }
 
-        // There are two cases where we need to return proof_of_latest_event to let the caller know
-        // the latest sequence number:
-        //   1. The user asks for the latest event by using u64::max() as the cursor, apparently
-        // he doesn't know the latest sequence number.
-        //   2. We are going to return less than `real_limit` items. (Two cases can lead to that:
-        // a. the cursor is beyond the latest sequence number; b. in ascending order we don't have
-        // enough items to return because the latest sequence number is hit). In this case we
-        // need to return the proof to convince the caller we didn't hide any item from him. Note
-        // that we use `real_limit` instead of `limit` here because it takes into account the case
-        // of hitting 0 in descending order, which is valid and doesn't require the proof.
-        let proof_of_latest_event = if get_latest || events_with_proof.len() < real_limit as usize {
-            Some(self.get_account_state_with_proof(
-                access_path.address,
-                ledger_version,
-                ledger_version,
-            )?)
-        } else {
-            None
-        };
-
-        Ok((events_with_proof, proof_of_latest_event))
+        // We always need to return the account blob to prove that this is indeed the event that was
+        // being queried.
+        Ok((events_with_proof, account_state))
     }
 
     /// Returns a signed transaction that is the `seq_num`-th one associated with the given account.
@@ -385,6 +376,10 @@ impl LibraDB {
         // Persist.
         let (sealed_cs, counters) = self.seal_change_set(first_version, num_txns, cs)?;
         self.commit(sealed_cs)?;
+        // Once everything is successfully persisted, update the latest in-memory ledger info.
+        if let Some(x) = ledger_info_with_sigs {
+            self.ledger_store.set_latest_ledger_info(x.clone());
+        }
 
         // Only increment counter if commit succeeds and there are at least one transaction written
         // to the storage. That's also when we'd inform the pruner thread to work.
@@ -434,24 +429,11 @@ impl LibraDB {
                     .put_transaction(ver, txn_to_commit.signed_txn(), &mut cs)
             })
             .collect::<Result<()>>()?;
-        let txn_hashes = txns_to_commit
-            .iter()
-            .map(|txn_to_commit| txn_to_commit.signed_txn().hash())
-            .collect::<Vec<_>>();
-        let gas_amounts = txns_to_commit
-            .iter()
-            .map(TransactionToCommit::gas_used)
-            .collect::<Vec<_>>();
 
         // Transaction accumulator updates. Get result root hash.
-        let txn_infos = izip!(
-            txn_hashes,
-            state_root_hashes,
-            event_root_hashes,
-            gas_amounts
-        )
-        .map(|(t, s, e, g)| TransactionInfo::new(t, s, e, g))
-        .collect::<Vec<_>>();
+        let txn_infos = izip!(txns_to_commit, state_root_hashes, event_root_hashes)
+            .map(|(t, s, e)| TransactionInfo::new(t.signed_txn().hash(), s, e, t.gas_used()))
+            .collect::<Vec<_>>();
         assert_eq!(txn_infos.len(), txns_to_commit.len());
 
         let new_root_hash =
@@ -558,12 +540,12 @@ impl LibraDB {
         ))
     }
 
-    // =========================== Execution Internal APIs ========================================
+    // =========================== Libra Core Internal APIs ========================================
 
     /// Gets an account state by account address, out of the ledger state indicated by the state
     /// Merkle tree root hash.
     ///
-    /// This is used by the executor module internally.
+    /// This is used by libra core (executor) internally.
     pub fn get_account_state_with_proof_by_version(
         &self,
         address: AccountAddress,
@@ -573,12 +555,13 @@ impl LibraDB {
             .get_account_state_with_proof_by_version(address, version)
     }
 
-    /// Gets information needed from storage during the startup of the executor module.
+    /// Gets information needed from storage during the startup of the executor or state
+    /// synchronizer module.
     ///
-    /// This is used by the executor module internally.
-    pub fn get_executor_startup_info(&self) -> Result<Option<ExecutorStartupInfo>> {
+    /// This is used by the libra core (executor, state synchronizer) internally.
+    pub fn get_startup_info(&self) -> Result<Option<StartupInfo>> {
         // Get the latest ledger info. Return None if not bootstrapped.
-        let ledger_info_with_sigs = match self.ledger_store.get_latest_ledger_info_option()? {
+        let ledger_info_with_sigs = match self.ledger_store.get_latest_ledger_info_option() {
             Some(x) => x,
             None => return Ok(None),
         };
@@ -592,7 +575,7 @@ impl LibraDB {
             .ledger_store
             .get_ledger_frozen_subtree_hashes(latest_version)?;
 
-        Ok(Some(ExecutorStartupInfo {
+        Ok(Some(StartupInfo {
             ledger_info,
             latest_version,
             account_state_root_hash,

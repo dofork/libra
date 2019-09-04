@@ -7,6 +7,7 @@ publish = false
 edition = "2018"
 
 [dependencies]
+arc-swap = "0.4.2"
 byteorder = "1.3.2"
 itertools = "0.7.3"
 lazy_static = "1.2.0"
@@ -19,8 +20,7 @@ tempfile = "3.0.6"
 
 accumulator = { path = "../accumulator" }
 canonical_serialization = { path = "../../common/canonical_serialization" }
-crypto = { path = "../../crypto/legacy_crypto" }
-nextgen_crypto = { path = "../../crypto/nextgen_crypto" }
+crypto = { path = "../../crypto/crypto" }
 failure = { path = "../../common/failure_ext", package = "failure_ext" }
 jellyfish_merkle = { path = "../jellyfish_merkle" }
 logger = { path = "../../common/logger" }

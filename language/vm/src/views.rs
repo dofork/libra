@@ -16,12 +16,14 @@ use std::iter::DoubleEndedIterator;
 use crate::{
     access::ModuleAccess,
     file_format::{
-        CodeUnit, FieldDefinition, FunctionDefinition, FunctionHandle, FunctionSignature, Kind,
-        LocalIndex, LocalsSignature, ModuleHandle, SignatureToken, StructDefinition,
-        StructFieldInformation, StructHandle, StructHandleIndex, TypeSignature,
+        CodeUnit, CompiledModule, FieldDefinition, FunctionDefinition, FunctionHandle,
+        FunctionSignature, Kind, LocalIndex, LocalsSignature, ModuleHandle, SignatureToken,
+        StructDefinition, StructDefinitionIndex, StructFieldInformation, StructHandle,
+        StructHandleIndex, TypeSignature,
     },
     SignatureTokenKind,
 };
+use std::collections::BTreeSet;
 
 use types::language_storage::ModuleId;
 
@@ -149,6 +151,29 @@ impl<'a, T: ModuleAccess> ModuleView<'a, T> {
         self.name_to_struct_definition_view.get(name)
     }
 
+    pub fn function_acquired_resources(
+        &self,
+        function_handle: &FunctionHandle,
+    ) -> BTreeSet<StructDefinitionIndex> {
+        if function_handle.module.0 != CompiledModule::IMPLEMENTED_MODULE_INDEX {
+            return BTreeSet::new();
+        }
+
+        // TODO these unwraps should be VMInvariantViolations
+        let function_name = self
+            .as_inner()
+            .string_pool()
+            .get(function_handle.name.0 as usize)
+            .unwrap();
+        let function_def = self.function_definition(function_name).unwrap();
+        function_def
+            .as_inner()
+            .acquires_global_resources
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     pub fn id(&self) -> ModuleId {
         self.module.self_id()
     }
@@ -189,8 +214,8 @@ impl<'a, T: ModuleAccess> StructHandleView<'a, T> {
         self.struct_handle.is_nominal_resource
     }
 
-    pub fn type_parameter_constraints(&self) -> &Vec<Kind> {
-        &self.struct_handle.type_parameters
+    pub fn type_formals(&self) -> &Vec<Kind> {
+        &self.struct_handle.type_formals
     }
 
     pub fn definition(&self) -> StructDefinitionView<'a, T> {
@@ -271,8 +296,8 @@ impl<'a, T: ModuleAccess> StructDefinitionView<'a, T> {
         }
     }
 
-    pub fn type_parameter_constraints(&self) -> &Vec<Kind> {
-        self.struct_handle_view.type_parameter_constraints()
+    pub fn type_formals(&self) -> &Vec<Kind> {
+        self.struct_handle_view.type_formals()
     }
 
     pub fn fields(

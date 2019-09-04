@@ -21,27 +21,35 @@ use canonical_serialization::{
     SimpleSerializer,
 };
 use crypto::{
+    ed25519::*,
     hash::{
         CryptoHash, CryptoHasher, EventAccumulatorHasher, RawTransactionHasher,
         SignedTransactionHasher, TransactionInfoHasher,
     },
+    traits::*,
     HashValue,
 };
 use failure::prelude::*;
-use nextgen_crypto::{ed25519::*, traits::*};
 #[cfg(any(test, feature = "testing"))]
 use proptest_derive::Arbitrary;
 use proto_conv::{FromProto, IntoProto, IntoProtoBytes};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, convert::TryFrom, fmt, time::Duration};
 
+mod module;
 mod program;
+mod script;
 mod transaction_argument;
 
-pub use program::{Program, TransactionArgument, SCRIPT_HASH_LENGTH};
+#[cfg(test)]
+mod unit_tests;
+
+pub use module::Module;
+pub use program::{Program, SCRIPT_HASH_LENGTH};
 use protobuf::well_known_types::UInt64Value;
+pub use script::Script;
 use std::ops::Deref;
-pub use transaction_argument::parse_as_transaction_argument;
+pub use transaction_argument::{parse_as_transaction_argument, TransactionArgument};
 
 pub type Version = u64; // Height - also used for MVCC in StateDB
 
@@ -87,6 +95,49 @@ impl RawTransaction {
             sender,
             sequence_number,
             payload: TransactionPayload::Program(program),
+            max_gas_amount,
+            gas_unit_price,
+            expiration_time,
+        }
+    }
+
+    /// Create a new `RawTransaction` with a script.
+    ///
+    /// A script transaction contains only code to execute. No publishing is allowed in scripts.
+    pub fn new_script(
+        sender: AccountAddress,
+        sequence_number: u64,
+        script: Script,
+        max_gas_amount: u64,
+        gas_unit_price: u64,
+        expiration_time: Duration,
+    ) -> Self {
+        RawTransaction {
+            sender,
+            sequence_number,
+            payload: TransactionPayload::Script(script),
+            max_gas_amount,
+            gas_unit_price,
+            expiration_time,
+        }
+    }
+
+    /// Create a new `RawTransaction` with a module to publish.
+    ///
+    /// A module transaction is the only way to publish code. Only one module per transaction
+    /// can be published.
+    pub fn new_module(
+        sender: AccountAddress,
+        sequence_number: u64,
+        module: Module,
+        max_gas_amount: u64,
+        gas_unit_price: u64,
+        expiration_time: Duration,
+    ) -> Self {
+        RawTransaction {
+            sender,
+            sequence_number,
+            payload: TransactionPayload::Module(module),
             max_gas_amount,
             gas_unit_price,
             expiration_time,
@@ -141,6 +192,10 @@ impl RawTransaction {
                 (get_transaction_name(program.code()), program.args())
             }
             TransactionPayload::WriteSet(_) => ("genesis".to_string(), &empty_vec[..]),
+            TransactionPayload::Script(script) => {
+                (get_transaction_name(script.code()), script.args())
+            }
+            TransactionPayload::Module(_) => ("module publishing".to_string(), &empty_vec[..]),
         };
         let mut f_args: String = "".to_string();
         for arg in args {
@@ -197,6 +252,10 @@ impl FromProto for RawTransaction {
                 TransactionPayload::Program(Program::from_proto(txn.take_program())?)
             } else if txn.has_write_set() {
                 TransactionPayload::WriteSet(WriteSet::from_proto(txn.take_write_set())?)
+            } else if txn.has_module() {
+                TransactionPayload::Module(Module::from_proto(txn.take_module())?)
+            } else if txn.has_script() {
+                TransactionPayload::Script(Script::from_proto(txn.take_script())?)
             } else {
                 bail!("RawTransaction payload missing");
             },
@@ -219,6 +278,8 @@ impl IntoProto for RawTransaction {
             TransactionPayload::WriteSet(write_set) => {
                 transaction.set_write_set(write_set.into_proto())
             }
+            TransactionPayload::Script(script) => transaction.set_script(script.into_proto()),
+            TransactionPayload::Module(module) => transaction.set_module(module.into_proto()),
         }
         transaction.set_gas_unit_price(self.gas_unit_price);
         transaction.set_max_gas_amount(self.max_gas_amount);
@@ -227,12 +288,119 @@ impl IntoProto for RawTransaction {
     }
 }
 
+impl CanonicalSerialize for RawTransaction {
+    fn serialize(&self, serializer: &mut impl CanonicalSerializer) -> Result<()> {
+        serializer.encode_struct(&self.sender)?;
+        serializer.encode_u64(self.sequence_number)?;
+        serializer.encode_struct(&self.payload)?;
+        serializer.encode_u64(self.max_gas_amount)?;
+        serializer.encode_u64(self.gas_unit_price)?;
+        serializer.encode_u64(self.expiration_time.as_secs())?;
+        Ok(())
+    }
+}
+
+impl CanonicalDeserialize for RawTransaction {
+    fn deserialize(deserializer: &mut impl CanonicalDeserializer) -> Result<Self> {
+        let sender = deserializer.decode_struct()?;
+        let sequence_number = deserializer.decode_u64()?;
+        let payload = deserializer.decode_struct()?;
+        let max_gas_amount = deserializer.decode_u64()?;
+        let gas_unit_price = deserializer.decode_u64()?;
+        let expiration_time = Duration::from_secs(deserializer.decode_u64()?);
+
+        Ok(RawTransaction {
+            sender,
+            sequence_number,
+            payload,
+            max_gas_amount,
+            gas_unit_price,
+            expiration_time,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TransactionPayload {
     /// A regular programmatic transaction that is executed by the VM.
     Program(Program),
     WriteSet(WriteSet),
+    /// A transaction that publishes code.
+    Module(Module),
+    /// A transaction that executes code.
+    Script(Script),
 }
+
+impl CanonicalSerialize for TransactionPayload {
+    fn serialize(&self, serializer: &mut impl CanonicalSerializer) -> Result<()> {
+        match self {
+            TransactionPayload::Program(program) => {
+                serializer.encode_u32(TransactionPayloadType::Program as u32)?;
+                serializer.encode_struct(program)?;
+            }
+            TransactionPayload::WriteSet(write_set) => {
+                serializer.encode_u32(TransactionPayloadType::WriteSet as u32)?;
+                serializer.encode_struct(write_set)?;
+            }
+            TransactionPayload::Script(script) => {
+                serializer.encode_u32(TransactionPayloadType::Script as u32)?;
+                serializer.encode_struct(script)?;
+            }
+            TransactionPayload::Module(module) => {
+                serializer.encode_u32(TransactionPayloadType::Module as u32)?;
+                serializer.encode_struct(module)?;
+            }
+        };
+        Ok(())
+    }
+}
+
+impl CanonicalDeserialize for TransactionPayload {
+    fn deserialize(deserializer: &mut impl CanonicalDeserializer) -> Result<Self> {
+        let decoded_payload_type = deserializer.decode_u32()?;
+        let payload_type = TransactionPayloadType::from_u32(decoded_payload_type);
+        match payload_type {
+            Some(TransactionPayloadType::Program) => {
+                Ok(TransactionPayload::Program(deserializer.decode_struct()?))
+            }
+            Some(TransactionPayloadType::WriteSet) => {
+                Ok(TransactionPayload::WriteSet(deserializer.decode_struct()?))
+            }
+            Some(TransactionPayloadType::Script) => {
+                Ok(TransactionPayload::Script(deserializer.decode_struct()?))
+            }
+            Some(TransactionPayloadType::Module) => {
+                Ok(TransactionPayload::Module(deserializer.decode_struct()?))
+            }
+            None => Err(format_err!(
+                "ParseError: Unable to decode TransactionPayloadType, found {}",
+                decoded_payload_type
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+enum TransactionPayloadType {
+    Program = 0,
+    WriteSet = 1,
+    Script = 2,
+    Module = 3,
+}
+
+impl TransactionPayloadType {
+    fn from_u32(value: u32) -> Option<TransactionPayloadType> {
+        match value {
+            0 => Some(TransactionPayloadType::Program),
+            1 => Some(TransactionPayloadType::WriteSet),
+            2 => Some(TransactionPayloadType::Script),
+            3 => Some(TransactionPayloadType::Module),
+            _ => None,
+        }
+    }
+}
+
+impl ::std::marker::Copy for TransactionPayloadType {}
 
 /// A transaction that has been signed.
 ///
@@ -268,11 +436,6 @@ pub struct SignedTransaction {
 pub struct SignatureCheckedTransaction(SignedTransaction);
 
 impl SignatureCheckedTransaction {
-    /// Returns a reference to the `SignedTransaction` within.
-    pub fn as_inner(&self) -> &SignedTransaction {
-        &self.0
-    }
-
     /// Returns the `SignedTransaction` within.
     pub fn into_inner(self) -> SignedTransaction {
         self.0
@@ -554,9 +717,9 @@ impl IntoProto for SignedTransactionWithProof {
 impl CanonicalSerialize for SignedTransaction {
     fn serialize(&self, serializer: &mut impl CanonicalSerializer) -> Result<()> {
         serializer
-            .encode_variable_length_bytes(&self.raw_txn_bytes)?
-            .encode_variable_length_bytes(&self.public_key.to_bytes())?
-            .encode_variable_length_bytes(&self.signature.to_bytes())?;
+            .encode_bytes(&self.raw_txn_bytes)?
+            .encode_bytes(&self.public_key.to_bytes())?
+            .encode_bytes(&self.signature.to_bytes())?;
         Ok(())
     }
 }
@@ -566,9 +729,9 @@ impl CanonicalDeserialize for SignedTransaction {
     where
         Self: Sized,
     {
-        let raw_txn_bytes = deserializer.decode_variable_length_bytes()?;
-        let public_key_bytes = deserializer.decode_variable_length_bytes()?;
-        let signature_bytes = deserializer.decode_variable_length_bytes()?;
+        let raw_txn_bytes = deserializer.decode_bytes()?;
+        let public_key_bytes = deserializer.decode_bytes()?;
+        let signature_bytes = deserializer.decode_bytes()?;
         let proto_raw_transaction = protobuf::parse_from_bytes::<
             crate::proto::transaction::RawTransaction,
         >(raw_txn_bytes.as_ref())?;
@@ -735,9 +898,9 @@ impl TransactionInfo {
 impl CanonicalSerialize for TransactionInfo {
     fn serialize(&self, serializer: &mut impl CanonicalSerializer) -> Result<()> {
         serializer
-            .encode_raw_bytes(self.signed_transaction_hash.as_ref())?
-            .encode_raw_bytes(self.state_root_hash.as_ref())?
-            .encode_raw_bytes(self.event_root_hash.as_ref())?
+            .encode_bytes(self.signed_transaction_hash.as_ref())?
+            .encode_bytes(self.state_root_hash.as_ref())?
+            .encode_bytes(self.event_root_hash.as_ref())?
             .encode_u64(self.gas_used)?;
         Ok(())
     }

@@ -13,10 +13,10 @@ use crate::{
     txn_manager::MempoolProxy,
 };
 use network::validator_network::{ConsensusNetworkEvents, ConsensusNetworkSender};
-use nextgen_crypto::ed25519::*;
 
 use crate::chained_bft::{
-    chained_bft_smr::ChainedBftSMRConfig, common::Author, persistent_storage::StorageWriteProxy,
+    chained_bft_smr::ChainedBftSMRConfig, common::Author, epoch_manager::EpochManager,
+    persistent_storage::StorageWriteProxy,
 };
 use config::config::{ConsensusProposerType::FixedProposer, NodeConfig};
 use execution_proto::proto::execution_grpc::ExecutionClient;
@@ -27,16 +27,15 @@ use state_synchronizer::StateSyncClient;
 use std::{convert::TryFrom, sync::Arc};
 use tokio::runtime;
 use types::{
-    account_address::AccountAddress, transaction::SignedTransaction,
-    validator_signer::ValidatorSigner, validator_verifier::ValidatorVerifier,
+    account_address::AccountAddress,
+    crypto_proxies::{ValidatorSigner, ValidatorVerifier},
+    transaction::SignedTransaction,
 };
 
 struct InitialSetup {
     author: Author,
-    signer: ValidatorSigner<Ed25519PrivateKey>,
-    quorum_size: usize,
-    peers: Arc<Vec<Author>>,
-    validator: Arc<ValidatorVerifier<Ed25519PublicKey>>,
+    signer: ValidatorSigner,
+    validator: ValidatorVerifier,
 }
 
 /// Supports the implementation of ConsensusProvider using LibraBFT.
@@ -62,18 +61,19 @@ impl ChainedBftProvider {
             .expect("Failed to create Tokio runtime!");
 
         let initial_setup = Self::initialize_setup(node_config);
+        let epoch_mgr = Arc::new(EpochManager::new(0, initial_setup.validator.clone()));
         let network = ConsensusNetworkImpl::new(
             initial_setup.author,
             network_sender.clone(),
             network_events,
-            Arc::clone(&initial_setup.peers),
-            Arc::clone(&initial_setup.validator),
+            Arc::clone(&epoch_mgr),
         );
         let proposer = {
+            let peers = epoch_mgr.validators().get_ordered_account_addresses();
             if node_config.consensus.get_proposer_type() == FixedProposer {
-                vec![Self::choose_leader(&initial_setup)]
+                vec![Self::choose_leader(peers)]
             } else {
-                initial_setup.validator.get_ordered_account_addresses()
+                peers
             }
         };
         debug!("[Consensus] My peer: {:?}", initial_setup.author);
@@ -87,7 +87,6 @@ impl ChainedBftProvider {
         );
         let smr = ChainedBftSMR::new(
             initial_setup.author,
-            initial_setup.quorum_size,
             initial_setup.signer,
             proposer,
             network,
@@ -95,6 +94,7 @@ impl ChainedBftProvider {
             config,
             storage,
             initial_data,
+            epoch_mgr,
         );
         Self {
             smr,
@@ -109,31 +109,22 @@ impl ChainedBftProvider {
     fn initialize_setup(node_config: &mut NodeConfig) -> InitialSetup {
         // Keeping the initial set of validators in a node config is embarrassing and we should
         // all feel bad about it.
-        let peer_id_str = node_config.base.peer_id.clone();
+        let peer_id_str = node_config.network.peer_id.clone();
         let author =
             AccountAddress::try_from(peer_id_str).expect("Failed to parse peer id of a validator");
         let private_key = node_config
-            .base
+            .network
             .peer_keypairs
             .take_consensus_private()
             .expect(
             "Failed to move a Consensus private key from a NodeConfig, key absent or already read",
         );
-
         let signer = ValidatorSigner::new(author, private_key);
-        let peers_with_public_keys = node_config.base.trusted_peers.get_trusted_consensus_peers();
-        let peers_with_nextgen_public_keys = peers_with_public_keys
-            .clone()
-            .into_iter()
-            .map(|(k, v)| (AccountAddress::clone(&k), v))
-            .collect();
-        let peers = Arc::new(
-            peers_with_public_keys
-                .keys()
-                .map(AccountAddress::clone)
-                .collect(),
-        );
-        let validator = Arc::new(ValidatorVerifier::new(peers_with_nextgen_public_keys));
+        let peers_with_public_keys = node_config
+            .network
+            .trusted_peers
+            .get_trusted_consensus_peers();
+        let validator = ValidatorVerifier::new(peers_with_public_keys);
         counters::EPOCH_NUM.set(0); // No reconfiguration yet, so it is always zero
         counters::CURRENT_EPOCH_NUM_VALIDATORS.set(validator.len() as i64);
         counters::CURRENT_EPOCH_QUORUM_SIZE.set(validator.quorum_size() as i64);
@@ -141,22 +132,16 @@ impl ChainedBftProvider {
         InitialSetup {
             author,
             signer,
-            quorum_size: validator.quorum_size(),
-            peers,
             validator,
         }
     }
 
     /// Choose a proposer that is going to be the single leader (relevant for a mock fixed proposer
     /// election only).
-    fn choose_leader(initial_setup: &InitialSetup) -> Author {
+    fn choose_leader(peers: Vec<Author>) -> Author {
         // As it is just a tmp hack function, pick the max PeerId to be a proposer.
         // TODO: VRF will be integrated later.
-        *initial_setup
-            .peers
-            .iter()
-            .max()
-            .expect("No trusted peers found!")
+        peers.into_iter().max().expect("No trusted peers found!")
     }
 }
 

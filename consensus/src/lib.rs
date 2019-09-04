@@ -9,9 +9,12 @@
 
 #![deny(missing_docs)]
 #![feature(async_await)]
-#![recursion_limit = "128"]
-#[macro_use]
+#![recursion_limit = "512"]
 extern crate failure;
+
+#[allow(unused_imports)]
+#[macro_use]
+extern crate debug_interface;
 
 mod chained_bft;
 mod util;

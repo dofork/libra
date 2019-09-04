@@ -6,10 +6,8 @@
 use crate::{
     access_path::AccessPath,
     account_address::AccountAddress,
-    account_config::{
-        account_received_event_path, account_sent_event_path, get_account_resource_or_default,
-    },
-    account_state_blob::{AccountStateBlob, AccountStateWithProof},
+    account_config::get_account_resource_or_default,
+    account_state_blob::AccountStateWithProof,
     contract_event::EventWithProof,
     ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
     proto::get_with_proof::{
@@ -22,9 +20,8 @@ use crate::{
     validator_change::ValidatorChangeEventWithProof,
     validator_verifier::ValidatorVerifier,
 };
-use crypto::hash::CryptoHash;
+use crypto::{hash::CryptoHash, *};
 use failure::prelude::*;
-use nextgen_crypto::*;
 #[cfg(any(test, feature = "testing"))]
 use proptest_derive::Arbitrary;
 use proto_conv::{FromProto, IntoProto};
@@ -211,7 +208,7 @@ fn verify_response_item(
             *ascending,
             *limit,
             events_with_proof,
-            proof_of_latest_event.as_ref(),
+            proof_of_latest_event,
         ),
         // GetTransactions
         (
@@ -289,15 +286,19 @@ fn verify_get_events_by_access_path_resp(
     req_ascending: bool,
     req_limit: u64,
     events_with_proof: &[EventWithProof],
-    proof_of_latest_event: Option<&AccountStateWithProof>,
+    proof_of_latest_event: &AccountStateWithProof,
 ) -> Result<()> {
-    let seq_num_upper_bound = match proof_of_latest_event {
-        Some(proof) => {
-            proof.verify(ledger_info, ledger_info.version(), req_access_path.address)?;
-            get_next_event_seq_num(&proof.blob, &req_access_path)?
-        }
-        None => u64::max_value(),
+    let account_resource = get_account_resource_or_default(&proof_of_latest_event.blob)?;
+    let (seq_num_upper_bound, expected_event_key) = {
+        proof_of_latest_event.verify(
+            ledger_info,
+            ledger_info.version(),
+            req_access_path.address,
+        )?;
+        let event_handle = account_resource.get_event_handle_by_query_path(&req_access_path)?;
+        (event_handle.count(), event_handle.key())
     };
+
     let cursor =
         if !req_ascending && req_start_seq_num == u64::max_value() && seq_num_upper_bound > 0 {
             seq_num_upper_bound - 1
@@ -329,7 +330,7 @@ fn verify_get_events_by_access_path_resp(
         .map(|(e, seq_num)| {
             e.verify(
                 ledger_info,
-                req_access_path,
+                expected_event_key,
                 seq_num,
                 e.transaction_version,
                 e.event_index,
@@ -338,20 +339,6 @@ fn verify_get_events_by_access_path_resp(
         .collect::<Result<Vec<_>>>()?;
 
     Ok(())
-}
-
-fn get_next_event_seq_num(
-    account_state_blob: &Option<AccountStateBlob>,
-    access_path: &AccessPath,
-) -> Result<u64> {
-    let account_blob = get_account_resource_or_default(account_state_blob)?;
-    if account_received_event_path() == access_path.path {
-        Ok(account_blob.received_events_count())
-    } else if account_sent_event_path() == access_path.path {
-        Ok(account_blob.sent_events_count())
-    } else {
-        bail!("Unrecognized access path: {}", access_path);
-    }
 }
 
 fn verify_get_txns_resp(
@@ -527,7 +514,8 @@ pub enum ResponseItem {
     },
     GetEventsByEventAccessPath {
         events_with_proof: Vec<EventWithProof>,
-        proof_of_latest_event: Option<AccountStateWithProof>,
+        // TODO: Rename this field to proof_of_event_handle.
+        proof_of_latest_event: AccountStateWithProof,
     },
     GetTransactions {
         txn_list_with_proof: TransactionListWithProof,
@@ -564,7 +552,7 @@ impl ResponseItem {
 
     pub fn into_get_events_by_access_path_response(
         self,
-    ) -> Result<(Vec<EventWithProof>, Option<AccountStateWithProof>)> {
+    ) -> Result<(Vec<EventWithProof>, AccountStateWithProof)> {
         match self {
             ResponseItem::GetEventsByEventAccessPath {
                 events_with_proof,
@@ -624,11 +612,8 @@ impl FromProto for ResponseItem {
                 .map(EventWithProof::from_proto)
                 .collect::<Result<Vec<_>>>()?;
 
-            let proof_of_latest_event = res
-                .proof_of_latest_event
-                .take()
-                .map(AccountStateWithProof::from_proto)
-                .transpose()?;
+            let proof_of_latest_event =
+                AccountStateWithProof::from_proto(res.take_proof_of_latest_event())?;
 
             ResponseItem::GetEventsByEventAccessPath {
                 events_with_proof,
@@ -688,9 +673,7 @@ impl IntoProto for ResponseItem {
                         .map(EventWithProof::into_proto)
                         .collect(),
                 ));
-                if let Some(p) = proof_of_latest_event {
-                    res.set_proof_of_latest_event(p.into_proto());
-                }
+                res.set_proof_of_latest_event(proof_of_latest_event.into_proto());
 
                 out.set_get_events_by_event_access_path_response(res);
             }

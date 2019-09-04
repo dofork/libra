@@ -6,7 +6,9 @@ use crate::{
         common::Author,
         consensus_types::{
             block::Block, proposal_msg::ProposalMsg, quorum_cert::QuorumCert, sync_info::SyncInfo,
+            vote_data::VoteData,
         },
+        epoch_manager::EpochManager,
         network::{BlockRetrievalResponse, ConsensusNetworkImpl, NetworkReceivers},
         safety::vote_msg::VoteMsg,
         test_utils::{consensus_runtime, placeholder_ledger_info},
@@ -14,30 +16,21 @@ use crate::{
     state_replication::ExecutedState,
 };
 use channel;
-use crypto::HashValue;
+use crypto::{ed25519::*, HashValue};
 use futures::{channel::mpsc, executor::block_on, FutureExt, SinkExt, StreamExt, TryFutureExt};
 use network::{
     interface::{NetworkNotification, NetworkRequest},
-    proto::{BlockRetrievalStatus, ConsensusMsg, QuorumCert as ProtoQuorumCert, RequestChunk},
+    proto::{BlockRetrievalStatus, ConsensusMsg},
     protocols::rpc::InboundRpcRequest,
     validator_network::{ConsensusNetworkEvents, ConsensusNetworkSender},
 };
-use nextgen_crypto::ed25519::*;
-use proto_conv::FromProto;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 use tokio::runtime::TaskExecutor;
-use types::{
-    account_address::AccountAddress,
-    proto::ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
-    test_helpers::transaction_test_helpers::get_test_signed_txn,
-    transaction::{SignedTransaction, TransactionInfo, TransactionListWithProof},
-    validator_signer::ValidatorSigner,
-    validator_verifier::ValidatorVerifier,
-};
+use types::{validator_signer::ValidatorSigner, validator_verifier::ValidatorVerifier};
 
 /// `NetworkPlayground` mocks the network implementation and provides convenience
 /// methods for testing. Test clients can use `wait_for_messages` or
@@ -342,32 +335,34 @@ fn test_network_api() {
         peers.push(random_validator_signer.author());
         signers.push(random_validator_signer);
     }
-    let validator = Arc::new(ValidatorVerifier::new(author_to_public_keys));
-    for i in 0..num_nodes {
+    let validator = ValidatorVerifier::new(author_to_public_keys);
+    let epoch_mgr = Arc::new(EpochManager::new(0, validator));
+    for peer in &peers {
         let (network_reqs_tx, network_reqs_rx) = channel::new_test(8);
         let (consensus_tx, consensus_rx) = channel::new_test(8);
         let network_sender = ConsensusNetworkSender::new(network_reqs_tx);
         let network_events = ConsensusNetworkEvents::new(consensus_rx);
 
-        playground.add_node(peers[i], consensus_tx, network_reqs_rx);
+        playground.add_node(*peer, consensus_tx, network_reqs_rx);
         let mut node = ConsensusNetworkImpl::new(
-            peers[i],
+            *peer,
             network_sender,
             network_events,
-            Arc::new(peers.clone()),
-            Arc::clone(&validator),
+            Arc::clone(&epoch_mgr),
         );
         receivers.push(node.start(&runtime.executor()));
         nodes.push(node);
     }
     let vote = VoteMsg::new(
-        HashValue::random(),
-        ExecutedState::state_for_genesis(),
-        1,
-        HashValue::random(),
-        0,
-        HashValue::random(),
-        0,
+        VoteData::new(
+            HashValue::random(),
+            ExecutedState::state_for_genesis(),
+            1,
+            HashValue::random(),
+            0,
+            HashValue::random(),
+            0,
+        ),
         peers[0],
         placeholder_ledger_info(),
         &signers[0],
@@ -418,7 +413,8 @@ fn test_rpc() {
             .unwrap()
             .push(random_validator_signer.author());
     }
-    let validator = Arc::new(ValidatorVerifier::new(author_to_public_keys));
+    let validator = ValidatorVerifier::new(author_to_public_keys);
+    let epoch_mgr = Arc::new(EpochManager::new(0, validator));
     for i in 0..num_nodes {
         let (network_reqs_tx, network_reqs_rx) = channel::new_test(8);
         let (consensus_tx, consensus_rx) = channel::new_test(8);
@@ -430,8 +426,7 @@ fn test_rpc() {
             peers[i],
             network_sender.clone(),
             network_events,
-            Arc::clone(&peers),
-            Arc::clone(&validator),
+            Arc::clone(&epoch_mgr),
         );
         senders.push(network_sender);
         receivers.push(node.start(&runtime.executor()));
@@ -464,72 +459,5 @@ fn test_rpc() {
             .await
             .unwrap();
         assert_eq!(response.blocks[0], *genesis);
-    });
-
-    // verify request chunk rpc
-    let mut chunk_retrieval = receiver_1.chunk_retrieval;
-    let on_request_chunk = async move {
-        while let Some(request) = chunk_retrieval.next().await {
-            let keypair = compat::generate_keypair(None);
-            let proto_txn =
-                get_test_signed_txn(AccountAddress::random(), 0, keypair.0, keypair.1, None);
-            let txn = SignedTransaction::from_proto(proto_txn).unwrap();
-            let info =
-                TransactionInfo::new(HashValue::zero(), HashValue::zero(), HashValue::zero(), 0);
-            request
-                .response_sender
-                .send(Ok(TransactionListWithProof::new(
-                    vec![(txn, info)],
-                    None,
-                    None,
-                    None,
-                    None,
-                )))
-                .unwrap();
-        }
-    };
-    runtime
-        .executor()
-        .spawn(on_request_chunk.boxed().unit_error().compat());
-
-    block_on(async move {
-        let mut ledger_info = LedgerInfo::new();
-        ledger_info.set_transaction_accumulator_hash(HashValue::zero().to_vec());
-        ledger_info.set_consensus_block_id(HashValue::zero().to_vec());
-        ledger_info.set_consensus_data_hash(
-            VoteMsg::vote_digest(
-                HashValue::zero(),
-                ExecutedState {
-                    state_id: HashValue::zero(),
-                    version: 0,
-                },
-                0,
-                HashValue::zero(),
-                0,
-                HashValue::zero(),
-                0,
-            )
-            .to_vec(),
-        );
-        let mut ledger_info_with_sigs = LedgerInfoWithSignatures::new();
-        ledger_info_with_sigs.set_ledger_info(ledger_info);
-        let mut target = ProtoQuorumCert::new();
-        target.set_block_id(HashValue::zero().into());
-        target.set_state_id(HashValue::zero().into());
-        target.set_round(0);
-        target.set_signed_ledger_info(ledger_info_with_sigs);
-        target.set_parent_block_id(HashValue::zero().into());
-        target.set_parent_block_round(0);
-        target.set_grandparent_block_id(HashValue::zero().into());
-        target.set_grandparent_block_round(0);
-        let mut req = RequestChunk::new();
-        req.set_start_version(0);
-        req.set_batch_size(1);
-        req.set_target_version(target.version);
-        let chunk = senders[0]
-            .request_chunk(peers[1], req, Duration::from_secs(5))
-            .await
-            .unwrap();
-        assert_eq!(chunk.get_txn_list_with_proof().get_transactions().len(), 1);
     });
 }

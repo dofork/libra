@@ -1,10 +1,11 @@
-// check: VerificationError { kind: FunctionDefinition, idx: 0, err: BorrowLocReferenceError(5) }
+// check: VerificationError
+// kind: BorrowLocReferenceError
 
 main() {
     let v: u64;
     let ref_v: &u64;
     v = 5;
     ref_v = &v;
-    release(&ref_v);
+    _ = &ref_v;
     return;
 }

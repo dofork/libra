@@ -68,9 +68,6 @@ pub enum InsertError {
     /// The block's timestamp is not greater than that of the parent.
     #[fail(display = "InvalidTimestamp")]
     NonIncreasingTimestamp,
-    /// The NIL block's timestamp is not equal to that of the parent.
-    #[fail(display = "InvalidNilBlockTimestamp")]
-    InvalidNilBlockTimestamp,
     /// The block is not newer than the root of the tree.
     #[fail(display = "OldBlock")]
     OldBlock,
@@ -170,15 +167,6 @@ pub trait BlockReader: Send + Sync {
     fn root(&self) -> Arc<Block<Self::Payload>>;
 
     fn get_quorum_cert_for_block(&self, block_id: HashValue) -> Option<Arc<QuorumCert>>;
-
-    /// Returns true if a given "ancestor" block is an ancestor of a given "block".
-    /// Returns a failure if not all the blocks are present between the block's height and the
-    /// parent's height.
-    fn is_ancestor(
-        &self,
-        ancestor: &Block<Self::Payload>,
-        block: &Block<Self::Payload>,
-    ) -> Result<bool, BlockTreeError>;
 
     /// Returns all the blocks between the root and the given block, including the given block
     /// but excluding the root.

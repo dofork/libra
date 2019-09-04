@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Integration tests for validator_network.
-#![cfg(test)]
 use crate::{
     common::NetworkPublicKeys,
     proto::{ConsensusMsg, MempoolSyncMsg, RequestBlock, RespondBlock, SignedTransaction},
@@ -12,8 +11,13 @@ use crate::{
     },
     ProtocolId,
 };
-use futures::{executor::block_on, future::join, StreamExt};
-use nextgen_crypto::{ed25519::compat, test_utils::TEST_SEED, x25519};
+use config::config::RoleType;
+use crypto::{ed25519::compat, test_utils::TEST_SEED, x25519};
+use futures::{
+    executor::block_on,
+    future::{join, FutureExt, TryFutureExt},
+    StreamExt,
+};
 use parity_multiaddr::Multiaddr;
 use protobuf::Message as proto_msg;
 use rand::{rngs::StdRng, SeedableRng};
@@ -37,35 +41,38 @@ fn test_network_builder() {
     let (signing_private_key, signing_public_key) = compat::generate_keypair(&mut rng);
     let (identity_private_key, identity_public_key) = x25519::compat::generate_keypair(&mut rng);
 
-    let (
-        (_mempool_network_sender, _mempool_network_events),
-        (_consensus_network_sender, _consensus_network_events),
-        (_state_sync_network_sender, _state_sync_network_events),
-        _listen_addr,
-    ) = NetworkBuilder::new(runtime.executor(), peer_id, addr)
-        .transport(TransportType::Memory)
-        .signing_keys((signing_private_key, signing_public_key.clone()))
-        .identity_keys((identity_private_key, identity_public_key.clone()))
-        .trusted_peers(
-            vec![(
-                peer_id,
-                NetworkPublicKeys {
-                    signing_public_key,
-                    identity_public_key,
-                },
-            )]
-            .into_iter()
-            .collect(),
-        )
-        .channel_size(8)
-        .consensus_protocols(vec![consensus_get_blocks_protocol.clone()])
-        .mempool_protocols(vec![mempool_sync_protocol.clone()])
-        .direct_send_protocols(vec![mempool_sync_protocol])
-        .rpc_protocols(vec![
-            consensus_get_blocks_protocol,
-            synchronizer_get_chunks_protocol,
-        ])
-        .build();
+    let (_listen_addr, mut network_provider) =
+        NetworkBuilder::new(runtime.executor(), peer_id, addr, RoleType::Validator)
+            .transport(TransportType::Memory)
+            .signing_keys((signing_private_key, signing_public_key.clone()))
+            .identity_keys((identity_private_key, identity_public_key.clone()))
+            .trusted_peers(
+                vec![(
+                    peer_id,
+                    NetworkPublicKeys {
+                        signing_public_key,
+                        identity_public_key,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            )
+            .channel_size(8)
+            .direct_send_protocols(vec![mempool_sync_protocol.clone()])
+            .rpc_protocols(vec![
+                consensus_get_blocks_protocol.clone(),
+                synchronizer_get_chunks_protocol.clone(),
+            ])
+            .build();
+    let (_mempool_network_sender, _mempool_network_events) =
+        network_provider.add_mempool(vec![mempool_sync_protocol.clone()]);
+    let (_consensus_network_sender, _consensus_network_events) =
+        network_provider.add_consensus(vec![consensus_get_blocks_protocol.clone()]);
+    let (_state_sync_network_sender, _state_sync_network_events) =
+        network_provider.add_state_synchronizer(vec![synchronizer_get_chunks_protocol.clone()]);
+    runtime
+        .executor()
+        .spawn(network_provider.start().unit_error().compat());
 }
 
 #[test]
@@ -89,9 +96,6 @@ fn test_mempool_sync() {
     let (dialer_identity_private_key, dialer_identity_public_key) =
         x25519::compat::generate_keypair(&mut rng);
 
-    // Set up the listener network
-    let listener_addr: Multiaddr = "/memory/0".parse().unwrap();
-
     let trusted_peers: HashMap<_, _> = vec![
         (
             listener_peer_id,
@@ -111,36 +115,53 @@ fn test_mempool_sync() {
     .into_iter()
     .collect();
 
-    let ((_, mut listener_mp_net_events), _, _, listener_addr) =
-        NetworkBuilder::new(runtime.executor(), listener_peer_id, listener_addr)
-            .signing_keys((listener_signing_private_key, listener_signing_public_key))
-            .identity_keys((listener_identity_private_key, listener_identity_public_key))
-            .trusted_peers(trusted_peers.clone())
-            .transport(TransportType::Memory)
-            .channel_size(8)
-            .mempool_protocols(vec![mempool_sync_protocol.clone()])
-            .direct_send_protocols(vec![mempool_sync_protocol.clone()])
-            .build();
+    // Set up the listener network
+    let listener_addr: Multiaddr = "/memory/0".parse().unwrap();
+    let (listener_addr, mut network_provider) = NetworkBuilder::new(
+        runtime.executor(),
+        listener_peer_id,
+        listener_addr,
+        RoleType::Validator,
+    )
+    .signing_keys((listener_signing_private_key, listener_signing_public_key))
+    .identity_keys((listener_identity_private_key, listener_identity_public_key))
+    .trusted_peers(trusted_peers.clone())
+    .transport(TransportType::Memory)
+    .channel_size(8)
+    .direct_send_protocols(vec![mempool_sync_protocol.clone()])
+    .build();
+    let (_, mut listener_mp_net_events) =
+        network_provider.add_mempool(vec![mempool_sync_protocol.clone()]);
+    runtime
+        .executor()
+        .spawn(network_provider.start().unit_error().compat());
 
     // Set up the dialer network
     let dialer_addr: Multiaddr = "/memory/0".parse().unwrap();
-
-    let ((mut dialer_mp_net_sender, mut dialer_mp_net_events), _, _, _dialer_addr) =
-        NetworkBuilder::new(runtime.executor(), dialer_peer_id, dialer_addr)
-            .transport(TransportType::Memory)
-            .signing_keys((dialer_signing_private_key, dialer_signing_public_key))
-            .identity_keys((dialer_identity_private_key, dialer_identity_public_key))
-            .trusted_peers(trusted_peers.clone())
-            .seed_peers(
-                [(listener_peer_id, vec![listener_addr])]
-                    .iter()
-                    .cloned()
-                    .collect(),
-            )
-            .channel_size(8)
-            .mempool_protocols(vec![mempool_sync_protocol.clone()])
-            .direct_send_protocols(vec![mempool_sync_protocol.clone()])
-            .build();
+    let (_dialer_addr, mut network_provider) = NetworkBuilder::new(
+        runtime.executor(),
+        dialer_peer_id,
+        dialer_addr,
+        RoleType::Validator,
+    )
+    .transport(TransportType::Memory)
+    .signing_keys((dialer_signing_private_key, dialer_signing_public_key))
+    .identity_keys((dialer_identity_private_key, dialer_identity_public_key))
+    .trusted_peers(trusted_peers.clone())
+    .seed_peers(
+        [(listener_peer_id, vec![listener_addr])]
+            .iter()
+            .cloned()
+            .collect(),
+    )
+    .channel_size(8)
+    .direct_send_protocols(vec![mempool_sync_protocol.clone()])
+    .build();
+    let (mut dialer_mp_net_sender, mut dialer_mp_net_events) =
+        network_provider.add_mempool(vec![mempool_sync_protocol.clone()]);
+    runtime
+        .executor()
+        .spawn(network_provider.start().unit_error().compat());
 
     // The dialer dials the listener and sends a mempool sync message
     let mut mempool_msg = MempoolSyncMsg::new();
@@ -213,9 +234,6 @@ fn test_consensus_rpc() {
     let (dialer_identity_private_key, dialer_identity_public_key) =
         x25519::compat::generate_keypair(&mut rng);
 
-    // Set up the listener network
-    let listener_addr: Multiaddr = "/memory/0".parse().unwrap();
-
     let trusted_peers: HashMap<_, _> = vec![
         (
             listener_peer_id,
@@ -235,36 +253,53 @@ fn test_consensus_rpc() {
     .into_iter()
     .collect();
 
-    let (_, (_, mut listener_con_net_events), _, listener_addr) =
-        NetworkBuilder::new(runtime.executor(), listener_peer_id, listener_addr)
-            .signing_keys((listener_signing_private_key, listener_signing_public_key))
-            .identity_keys((listener_identity_private_key, listener_identity_public_key))
-            .trusted_peers(trusted_peers.clone())
-            .transport(TransportType::Memory)
-            .channel_size(8)
-            .consensus_protocols(vec![rpc_protocol.clone()])
-            .rpc_protocols(vec![rpc_protocol.clone()])
-            .build();
+    // Set up the listener network
+    let listener_addr: Multiaddr = "/memory/0".parse().unwrap();
+    let (listener_addr, mut network_provider) = NetworkBuilder::new(
+        runtime.executor(),
+        listener_peer_id,
+        listener_addr,
+        RoleType::Validator,
+    )
+    .signing_keys((listener_signing_private_key, listener_signing_public_key))
+    .identity_keys((listener_identity_private_key, listener_identity_public_key))
+    .trusted_peers(trusted_peers.clone())
+    .transport(TransportType::Memory)
+    .channel_size(8)
+    .rpc_protocols(vec![rpc_protocol.clone()])
+    .build();
+    let (_, mut listener_con_net_events) =
+        network_provider.add_consensus(vec![rpc_protocol.clone()]);
+    runtime
+        .executor()
+        .spawn(network_provider.start().unit_error().compat());
 
     // Set up the dialer network
     let dialer_addr: Multiaddr = "/memory/0".parse().unwrap();
-
-    let (_, (mut dialer_con_net_sender, mut dialer_con_net_events), _, _dialer_addr) =
-        NetworkBuilder::new(runtime.executor(), dialer_peer_id, dialer_addr)
-            .transport(TransportType::Memory)
-            .signing_keys((dialer_signing_private_key, dialer_signing_public_key))
-            .identity_keys((dialer_identity_private_key, dialer_identity_public_key))
-            .trusted_peers(trusted_peers.clone())
-            .seed_peers(
-                [(listener_peer_id, vec![listener_addr])]
-                    .iter()
-                    .cloned()
-                    .collect(),
-            )
-            .channel_size(8)
-            .consensus_protocols(vec![rpc_protocol.clone()])
-            .rpc_protocols(vec![rpc_protocol.clone()])
-            .build();
+    let (_dialer_addr, mut network_provider) = NetworkBuilder::new(
+        runtime.executor(),
+        dialer_peer_id,
+        dialer_addr,
+        RoleType::Validator,
+    )
+    .transport(TransportType::Memory)
+    .signing_keys((dialer_signing_private_key, dialer_signing_public_key))
+    .identity_keys((dialer_identity_private_key, dialer_identity_public_key))
+    .trusted_peers(trusted_peers.clone())
+    .seed_peers(
+        [(listener_peer_id, vec![listener_addr])]
+            .iter()
+            .cloned()
+            .collect(),
+    )
+    .channel_size(8)
+    .rpc_protocols(vec![rpc_protocol.clone()])
+    .build();
+    let (mut dialer_con_net_sender, mut dialer_con_net_events) =
+        network_provider.add_consensus(vec![rpc_protocol.clone()]);
+    runtime
+        .executor()
+        .spawn(network_provider.start().unit_error().compat());
 
     let block_id = vec![0_u8; 32];
     let mut req_block_msg = RequestBlock::new();

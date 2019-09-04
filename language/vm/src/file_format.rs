@@ -239,8 +239,8 @@ pub struct StructHandle {
     ///
     /// If `is_nominal_resource` is true, it is a *nominal resource*
     pub is_nominal_resource: bool,
-    /// The type parameters (identified by their index into the vec) and their kind constraints
-    pub type_parameters: Vec<Kind>,
+    /// The type formals (identified by their index into the vec) and their kind constraints
+    pub type_formals: Vec<Kind>,
 }
 
 /// A `FunctionHandle` is a reference to a function. It is composed by a
@@ -328,6 +328,16 @@ pub struct FunctionDefinition {
     pub function: FunctionHandleIndex,
     /// Flags for this function (private, public, native, etc.)
     pub flags: u8,
+    /// List of nominal resources (declared in this module) that the procedure might access
+    /// Either through: BorrowGlobal, MoveFrom, or transitively through another procedure
+    /// This list of acquires grants the borrow checker the ability to statically verify the safety
+    /// of references into global storage
+    ///
+    /// Not in the signature as it is not needed outside of the declaring module
+    ///
+    /// Note, there is no LocalsSignatureIndex with each struct definition index, as global
+    /// resources cannot currently take type arguments
+    pub acquires_global_resources: Vec<StructDefinitionIndex>,
     /// Code for this function.
     #[cfg_attr(
         any(test, feature = "testing"),
@@ -380,8 +390,8 @@ pub struct FunctionSignature {
         proptest(strategy = "vec(any::<SignatureToken>(), 0..=params)")
     )]
     pub arg_types: Vec<SignatureToken>,
-    /// The type parameters (identified by their index into the vec) and their kind constraints
-    pub type_parameters: Vec<Kind>,
+    /// The type formals (identified by their index into the vec) and their kind constraints
+    pub type_formals: Vec<Kind>,
 }
 
 /// A `LocalsSignature` is the list of locals used by a function.
@@ -461,7 +471,7 @@ pub enum SignatureToken {
     Struct(StructHandleIndex, Vec<SignatureToken>),
     /// Reference to a type.
     Reference(Box<SignatureToken>),
-    /// Immutable reference to a type.
+    /// Mutable reference to a type.
     MutableReference(Box<SignatureToken>),
     /// Type parameter.
     TypeParameter(TypeParameterIndex),
@@ -811,36 +821,43 @@ pub enum Bytecode {
     ///
     /// ```..., value, reference_value -> ...```
     WriteRef,
-    /// Release a reference. The reference will become invalid and cannot be used after.
-    ///
-    /// All references must be consumed and ReleaseRef is a way to release references not
-    /// consumed by other opcodes.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., reference_value -> ...```
-    ReleaseRef,
     /// Convert a mutable reference to an immutable reference.
     ///
     /// Stack transition:
     ///
     /// ```..., reference_value -> ..., reference_value```
     FreezeRef,
-    /// Load a reference to a local identified by LocalIndex.
+    /// Load a mutable reference to a local identified by LocalIndex.
     ///
     /// The local must not be a reference.
     ///
     /// Stack transition:
     ///
     /// ```... -> ..., reference```
-    BorrowLoc(LocalIndex),
-    /// Load a reference to a field identified by `FieldDefinitionIndex`.
+    MutBorrowLoc(LocalIndex),
+    /// Load an immutable reference to a local identified by LocalIndex.
+    ///
+    /// The local must not be a reference.
+    ///
+    /// Stack transition:
+    ///
+    /// ```... -> ..., reference```
+    ImmBorrowLoc(LocalIndex),
+    /// Load a mutable reference to a field identified by `FieldDefinitionIndex`.
+    /// The top of the stack must be a mutable reference to a type that contains the field
+    /// definition.
+    ///
+    /// Stack transition:
+    ///
+    /// ```..., reference -> ..., field_reference```
+    MutBorrowField(FieldDefinitionIndex),
+    /// Load an immutable reference to a field identified by `FieldDefinitionIndex`.
     /// The top of the stack must be a reference to a type that contains the field definition.
     ///
     /// Stack transition:
     ///
     /// ```..., reference -> ..., field_reference```
-    BorrowField(FieldDefinitionIndex),
+    ImmBorrowField(FieldDefinitionIndex),
     /// Return reference to an instance of type `StructDefinitionIndex` published at the address
     /// passed as argument. Abort execution if such an object does not exist or if a reference
     /// has already been handed out.
@@ -1023,13 +1040,6 @@ pub enum Bytecode {
     ///
     /// ```..., address_value -> ...```
     CreateAccount,
-    /// Emit a log message.
-    /// This bytecode is not fully specified yet.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., reference, key, value -> ...```
-    EmitEvent,
     /// Get the sequence number submitted with the transaction and pushes it on the stack.
     ///
     /// Stack transition:
@@ -1071,10 +1081,11 @@ impl ::std::fmt::Debug for Bytecode {
             Bytecode::Unpack(a, b) => write!(f, "Unpack({}, {:?})", a, b),
             Bytecode::ReadRef => write!(f, "ReadRef"),
             Bytecode::WriteRef => write!(f, "WriteRef"),
-            Bytecode::ReleaseRef => write!(f, "ReleaseRef"),
             Bytecode::FreezeRef => write!(f, "FreezeRef"),
-            Bytecode::BorrowLoc(a) => write!(f, "BorrowLoc({})", a),
-            Bytecode::BorrowField(a) => write!(f, "BorrowField({})", a),
+            Bytecode::MutBorrowLoc(a) => write!(f, "MutBorrowLoc({})", a),
+            Bytecode::ImmBorrowLoc(a) => write!(f, "ImmBorrowLoc({})", a),
+            Bytecode::MutBorrowField(a) => write!(f, "MutBorrowField({})", a),
+            Bytecode::ImmBorrowField(a) => write!(f, "ImmBorrowField({})", a),
             Bytecode::BorrowGlobal(a, b) => write!(f, "BorrowGlobal({}, {:?})", a, b),
             Bytecode::Add => write!(f, "Add"),
             Bytecode::Sub => write!(f, "Sub"),
@@ -1102,7 +1113,6 @@ impl ::std::fmt::Debug for Bytecode {
             Bytecode::MoveFrom(a, b) => write!(f, "MoveFrom({}, {:?})", a, b),
             Bytecode::MoveToSender(a, b) => write!(f, "MoveToSender({}, {:?})", a, b),
             Bytecode::CreateAccount => write!(f, "CreateAccount"),
-            Bytecode::EmitEvent => write!(f, "EmitEvent"),
             Bytecode::GetTxnSequenceNumber => write!(f, "GetTxnSequenceNumber"),
             Bytecode::GetTxnPublicKey => write!(f, "GetTxnPublicKey"),
         }
@@ -1145,6 +1155,12 @@ impl Bytecode {
 
     /// Return the successor offsets of this bytecode instruction.
     pub fn get_successors(pc: CodeOffset, code: &[Bytecode]) -> Vec<CodeOffset> {
+        checked_precondition!(
+            // The program counter could be added to at most twice and must remain
+            // within the bounds of the code.
+            pc <= u16::max_value() - 2 && (pc as usize) < code.len(),
+            "Program counter out of bounds"
+        );
         let bytecode = &code[pc as usize];
         let mut v = vec![];
 
@@ -1553,7 +1569,7 @@ pub fn dummy_procedure_module(code: Vec<Bytecode>) -> CompiledModule {
     module.function_signatures.push(FunctionSignature {
         arg_types: vec![],
         return_types: vec![],
-        type_parameters: vec![],
+        type_formals: vec![],
     });
     let fun_handle = FunctionHandle {
         module: ModuleHandleIndex(0),

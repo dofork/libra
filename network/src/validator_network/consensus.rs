@@ -6,7 +6,7 @@
 use crate::{
     error::NetworkError,
     interface::{NetworkNotification, NetworkRequest},
-    proto::{ConsensusMsg, RequestBlock, RequestChunk, RespondBlock, RespondChunk},
+    proto::{ConsensusMsg, RequestBlock, RespondBlock},
     protocols::{
         direct_send::Message,
         rpc::{self, error::RpcError},
@@ -154,38 +154,6 @@ impl ConsensusNetworkSender {
         }
     }
 
-    /// Send a RequestChunk RPC request to remote peer `recipient`. Returns the
-    /// future `RespondChunk` returned by the remote peer.
-    ///
-    /// The rpc request can be canceled at any point by dropping the returned
-    /// future.
-    pub async fn request_chunk(
-        &mut self,
-        recipient: PeerId,
-        req_msg: RequestChunk,
-        timeout: Duration,
-    ) -> Result<RespondChunk, RpcError> {
-        let protocol = ProtocolId::from_static(CONSENSUS_RPC_PROTOCOL);
-        let mut req_msg_enum = ConsensusMsg::new();
-        req_msg_enum.set_request_chunk(req_msg);
-
-        let mut res_msg_enum = rpc::utils::unary_rpc(
-            self.inner.clone(),
-            recipient,
-            protocol,
-            req_msg_enum,
-            timeout,
-        )
-        .await?;
-
-        if res_msg_enum.has_respond_chunk() {
-            Ok(res_msg_enum.take_respond_chunk())
-        } else {
-            // TODO: context
-            Err(RpcError::InvalidRpcResponse)
-        }
-    }
-
     pub async fn update_eligible_nodes(
         &mut self,
         validators: Vec<ValidatorPublicKeys>,
@@ -213,13 +181,18 @@ impl ConsensusNetworkSender {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{proto::Vote, protocols::rpc::InboundRpcRequest};
+    use crate::{
+        proto::{Vote, VoteData},
+        protocols::rpc::InboundRpcRequest,
+    };
     use futures::{channel::oneshot, executor::block_on, future::try_join};
 
     fn new_test_vote() -> ConsensusMsg {
+        let mut vote_data = VoteData::new();
+        vote_data.set_block_id(Bytes::new());
+        vote_data.set_executed_state_id(Bytes::new());
         let mut vote = Vote::new();
-        vote.set_proposed_block_id(Bytes::new());
-        vote.set_executed_state_id(Bytes::new());
+        vote.set_vote_data(vote_data);
         vote.set_author(Bytes::new());
         vote.set_signature(Bytes::new());
 

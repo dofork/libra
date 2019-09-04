@@ -9,6 +9,7 @@ use crate::{
 use backoff::{ExponentialBackoff, Operation};
 use config::config::VMConfig;
 use crypto::{
+    ed25519::*,
     hash::{CryptoHash, EventAccumulatorHasher, TransactionAccumulatorHasher},
     HashValue,
 };
@@ -16,7 +17,6 @@ use execution_proto::{CommitBlockResponse, ExecuteBlockResponse, ExecuteChunkRes
 use failure::prelude::*;
 use futures::channel::oneshot;
 use logger::prelude::*;
-use nextgen_crypto::ed25519::*;
 use scratchpad::{Accumulator, ProofRead, SparseMerkleTree};
 use std::{
     collections::{hash_map, BTreeMap, HashMap, HashSet, VecDeque},
@@ -103,10 +103,13 @@ where
             command_receiver,
             committed_timestamp_usecs,
             committed_state_tree: Rc::new(SparseMerkleTree::new(previous_state_root_hash)),
-            committed_transaction_accumulator: Rc::new(Accumulator::new(
-                previous_frozen_subtrees_in_accumulator,
-                previous_num_leaves_in_accumulator,
-            )),
+            committed_transaction_accumulator: Rc::new(
+                Accumulator::new(
+                    previous_frozen_subtrees_in_accumulator,
+                    previous_num_leaves_in_accumulator,
+                )
+                .expect("The startup info read from storage should be valid."),
+            ),
             block_tree: BlockTree::new(last_committed_block_id),
             blocks_to_store: VecDeque::new(),
             storage_read_client,
@@ -149,8 +152,9 @@ where
                 };
                 let mut backoff = Self::storage_retry_backoff();
                 match save_op.retry(&mut backoff) {
-                    Ok(()) => OP_COUNTERS
-                        .observe("blocks_commit_time_us", time.elapsed().as_micros() as f64),
+                    Ok(()) => {
+                        OP_COUNTERS.observe_duration("blocks_commit_time_s", time.elapsed());
+                    }
                     Err(_err) => crit!(
                         "Failed to save blocks to storage after trying for {} seconds.",
                         backoff.get_elapsed_time().as_secs(),
@@ -321,13 +325,8 @@ where
             &self.committed_state_tree,
         );
         let vm_outputs = {
-            let time = std::time::Instant::now();
-            let out = V::execute_block(transactions.clone(), &self.vm_config, &state_view);
-            OP_COUNTERS.observe(
-                "vm_execute_chunk_time_us",
-                time.elapsed().as_micros() as f64,
-            );
-            out
+            let _timer = OP_COUNTERS.timer("vm_execute_chunk_time_s");
+            V::execute_block(transactions.clone(), &self.vm_config, &state_view)
         };
 
         // Since other validators have committed these transactions, their status should all be
@@ -380,9 +379,8 @@ where
 
         // If this is the last chunk corresponding to this ledger info, send the ledger info to
         // storage.
-        let num_txns = txns_to_commit.len() as u64;
         let ledger_info_to_commit = if self.committed_transaction_accumulator.num_leaves()
-            + num_txns
+            + txns_to_commit.len() as u64
             == ledger_info_with_sigs.ledger_info().version() + 1
         {
             // We have constructed the transaction accumulator root and checked that it matches the
@@ -397,6 +395,12 @@ where
             );
             Some(ledger_info_with_sigs)
         } else {
+            // This means that the current chunk is not the last one. If it's empty, there's
+            // nothing to write to storage. Since storage expect either new transaction or new
+            // ledger info, we need to return here.
+            if txns_to_commit.is_empty() {
+                return Ok(());
+            }
             None
         };
         self.storage_write_client.save_transactions(
@@ -582,9 +586,8 @@ where
         };
 
         {
-            let time = std::time::Instant::now();
+            let _timer = OP_COUNTERS.timer("block_execute_time_s");
             self.execute_block(id);
-            OP_COUNTERS.observe("block_execute_time_us", time.elapsed().as_micros() as f64);
         }
 
         true
@@ -607,17 +610,12 @@ where
             &previous_state_tree,
         );
         let vm_outputs = {
-            let time = std::time::Instant::now();
-            let out = V::execute_block(
+            let _timer = OP_COUNTERS.timer("vm_execute_block_time_s");
+            V::execute_block(
                 block_to_execute.transactions().to_vec(),
                 &self.vm_config,
                 &state_view,
-            );
-            OP_COUNTERS.observe(
-                "vm_execute_block_time_us",
-                time.elapsed().as_micros() as f64,
-            );
-            out
+            )
         };
 
         let status: Vec<_> = vm_outputs
@@ -810,7 +808,9 @@ where
                     // should not reach this code path. The exception is genesis transaction (and
                     // maybe other FTVM transactions).
                     match transaction.payload() {
-                        TransactionPayload::Program(_) => {
+                        TransactionPayload::Program(_)
+                        | TransactionPayload::Module(_)
+                        | TransactionPayload::Script(_) => {
                             bail!("Write set should be a subset of read set.")
                         }
                         TransactionPayload::WriteSet(_) => (),

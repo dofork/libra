@@ -1,7 +1,12 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{abstract_state::AbstractState, common, summaries};
+use crate::{
+    abstract_state::{AbstractState, BorrowState},
+    common,
+    control_flow_graph::CFG,
+    summaries,
+};
 use rand::{rngs::StdRng, FromEntropy, Rng, SeedableRng};
 use vm::file_format::{
     AddressPoolIndex, ByteArrayPoolIndex, Bytecode, FunctionSignature, SignatureToken,
@@ -10,6 +15,9 @@ use vm::file_format::{
 
 /// This type represents bytecode instructions that take a `u8`
 type U8ToBytecode = fn(u8) -> Bytecode;
+
+/// This type represents bytecode instructions that take a `u16`
+type U16ToBytecode = fn(u16) -> Bytecode;
 
 /// This type represents bytecode instructions that take a `u64`
 type U64ToBytecode = fn(u64) -> Bytecode;
@@ -31,6 +39,9 @@ enum BytecodeType {
 
     /// Instructions that take a `u8`
     U8(U8ToBytecode),
+
+    /// Instructions that take a `u16`
+    U16(U16ToBytecode),
 
     /// Instructions that take a `u64`
     U64(U64ToBytecode),
@@ -125,6 +136,9 @@ impl BytecodeGenerator {
                 StackEffect::Add,
                 BytecodeType::NoArg(Bytecode::GetTxnSequenceNumber),
             ),
+            (StackEffect::Nop, BytecodeType::U16(Bytecode::Branch)),
+            (StackEffect::Sub, BytecodeType::U16(Bytecode::BrTrue)),
+            (StackEffect::Sub, BytecodeType::U16(Bytecode::BrFalse)),
         ];
         let generator = match seed {
             Some(seed) => StdRng::from_seed(seed),
@@ -151,8 +165,16 @@ impl BytecodeGenerator {
                 BytecodeType::NoArg(instruction) => instruction.clone(),
                 BytecodeType::U8(instruction) => {
                     // Generate a random index into the locals
-                    let local_index: u8 = self.rng.gen_range(0, locals_len as u8);
-                    instruction(local_index)
+                    if locals_len > 0 {
+                        let local_index: u8 = self.rng.gen_range(0, locals_len as u8);
+                        instruction(local_index)
+                    } else {
+                        instruction(0)
+                    }
+                }
+                BytecodeType::U16(instruction) => {
+                    // Set 0 as the offset. This will be set correctly during serialization
+                    instruction(0)
                 }
                 BytecodeType::U64(instruction) => {
                     // Generate a random u64 constant to load
@@ -208,7 +230,6 @@ impl BytecodeGenerator {
                 })
                 .cloned()
                 .collect();
-            debug!("Add candidates: [{:?}]", add_candidates);
             // Add candidates should not be empty unless the list of bytecode instructions is
             // changed
             if add_candidates.is_empty() {
@@ -224,7 +245,6 @@ impl BytecodeGenerator {
                 })
                 .cloned()
                 .collect();
-            debug!("Sub candidates: [{:?}]", sub_candidates);
             // Sub candidates should not be empty unless the list of bytecode instructions is
             // changed
             if sub_candidates.is_empty() {
@@ -244,53 +264,128 @@ impl BytecodeGenerator {
             .fold(state, |acc, effect| effect(&acc))
     }
 
-    /// Return a sequence of bytecode instructions given a set of `locals` and a target return
-    /// `signature`. The sequence should contain at least `target_min` and at most `target_max`
-    /// instructions.
-    pub fn generate(
+    pub fn apply_instruction(
+        &self,
+        mut state: AbstractState,
+        bytecode: &mut Vec<Bytecode>,
+        instruction: Bytecode,
+    ) -> AbstractState {
+        debug!("**********************");
+        debug!("State1: [{:?}]", state);
+        debug!("Next instr: {:?}", instruction);
+        state = self.abstract_step(state, instruction.clone());
+        debug!("State2: {:?}", state);
+        bytecode.push(instruction);
+        debug!("**********************\n");
+        state
+    }
+
+    /// Given a valid starting state `abstract_state_in`, generate a valid sequence of
+    /// bytecode instructions such that `abstract_state_out` is reached.
+    pub fn generate_block(
         &mut self,
-        locals: &[SignatureToken],
-        signature: &FunctionSignature,
-        target_min: usize,
-        target_max: usize,
+        abstract_state_in: AbstractState,
+        abstract_state_out: AbstractState,
     ) -> Vec<Bytecode> {
         let mut bytecode: Vec<Bytecode> = Vec::new();
-        let mut state: AbstractState = AbstractState::new(&Vec::new());
+        let mut state = abstract_state_in.clone();
+        // Generate block body
         loop {
-            debug!("Bytecode: [{:?}]", bytecode);
-            debug!("AbstractState: [{:?}]", state);
-            let candidates = self.candidate_instructions(state.clone(), locals.len());
-            debug!("Candidates: [{:?}]", candidates);
+            let candidates =
+                self.candidate_instructions(state.clone(), abstract_state_in.get_locals().len());
             if candidates.is_empty() {
                 warn!("No candidates found for state: [{:?}]", state);
                 break;
             }
             let next_instruction = self.select_candidate(0, &state, &candidates);
-            debug!("Next instr: {:?}", next_instruction);
-            state = self.abstract_step(state, next_instruction.clone());
-            debug!("New state: {:?}", state);
-            bytecode.push(next_instruction);
-            debug!("**********************");
-            if bytecode.len() >= target_min && state.is_final() || bytecode.len() >= target_max {
-                info!("Instructions generated: {}", bytecode.len());
+            state = self.apply_instruction(state, &mut bytecode, next_instruction);
+            if state.is_final() {
                 break;
             }
         }
-        for return_type in signature.return_types.iter() {
-            match return_type {
-                SignatureToken::String => bytecode.push(Bytecode::LdStr(StringPoolIndex::new(0))),
-                SignatureToken::Address => {
-                    bytecode.push(Bytecode::LdAddr(AddressPoolIndex::new(0)))
+        // Fix local availability
+        for (i, (token_type, target_availability)) in abstract_state_out.get_locals().iter() {
+            if let Some((_, current_availability)) = state.local_get(*i) {
+                if *target_availability == BorrowState::Available
+                    && *current_availability == BorrowState::Unavailable
+                {
+                    let next_instruction = match token_type {
+                        SignatureToken::String => Bytecode::LdStr(StringPoolIndex::new(0)),
+                        SignatureToken::Address => Bytecode::LdAddr(AddressPoolIndex::new(0)),
+                        SignatureToken::U64 => Bytecode::LdConst(0),
+                        SignatureToken::Bool => Bytecode::LdFalse,
+                        SignatureToken::ByteArray => {
+                            Bytecode::LdByteArray(ByteArrayPoolIndex::new(0))
+                        }
+                        _ => unimplemented!("Unsupported return type: {:#?}", token_type),
+                    };
+                    state = self.apply_instruction(state, &mut bytecode, next_instruction);
+                    state = self.apply_instruction(state, &mut bytecode, Bytecode::StLoc(*i as u8));
+                } else if *target_availability == BorrowState::Unavailable
+                    && *current_availability == BorrowState::Available
+                {
+                    state =
+                        self.apply_instruction(state, &mut bytecode, Bytecode::MoveLoc(*i as u8));
+                    state = self.apply_instruction(state, &mut bytecode, Bytecode::Pop);
                 }
-                SignatureToken::U64 => bytecode.push(Bytecode::LdConst(0)),
-                SignatureToken::Bool => bytecode.push(Bytecode::LdFalse),
-                SignatureToken::ByteArray => {
-                    bytecode.push(Bytecode::LdByteArray(ByteArrayPoolIndex::new(0)))
-                }
-                _ => panic!("Unsupported return type: {:#?}", return_type),
+            } else {
+                unreachable!("Target locals out contains new local");
             }
         }
-        bytecode.push(Bytecode::Ret);
         bytecode
+    }
+
+    /// Generate the body of a function definition given a set of starting `locals` and a target
+    /// return `signature`. The sequence should contain at least `target_min` and at most
+    /// `target_max` instructions.
+    pub fn generate(
+        &mut self,
+        locals: &[SignatureToken],
+        signature: &FunctionSignature,
+        _target_min: usize,
+        _target_max: usize,
+    ) -> Vec<Bytecode> {
+        let mut cfg = CFG::new(&mut self.rng, locals, signature, 3);
+        let cfg_copy = cfg.clone();
+        for (block_id, block) in cfg.get_basic_blocks_mut().iter_mut() {
+            debug!("+++++++++++++++++ Starting new block +++++++++++++++++");
+            let state1 = AbstractState::from_locals(block.get_locals_in().clone());
+            let state2 = AbstractState::from_locals(block.get_locals_out().clone());
+            let mut bytecode = self.generate_block(state1, state2.clone());
+            let mut state_f = state2;
+            if cfg_copy.num_children(*block_id) == 2 {
+                // BrTrue, BrFalse: Add bool and branching instruction randomly
+                state_f = self.apply_instruction(state_f, &mut bytecode, Bytecode::LdFalse);
+                if self.rng.gen_range(0, 1) == 1 {
+                    self.apply_instruction(state_f, &mut bytecode, Bytecode::BrTrue(0));
+                } else {
+                    self.apply_instruction(state_f, &mut bytecode, Bytecode::BrFalse(0));
+                }
+            } else if cfg_copy.num_children(*block_id) == 1 {
+                // Branch: Add branch instruction
+                self.apply_instruction(state_f, &mut bytecode, Bytecode::Branch(0));
+            } else if cfg_copy.num_children(*block_id) == 0 {
+                // TODO: Abort
+                // Return: Add return types to last block
+                for token_type in signature.return_types.iter() {
+                    let next_instruction = match token_type {
+                        SignatureToken::String => Bytecode::LdStr(StringPoolIndex::new(0)),
+                        SignatureToken::Address => Bytecode::LdAddr(AddressPoolIndex::new(0)),
+                        SignatureToken::U64 => Bytecode::LdConst(0),
+                        SignatureToken::Bool => Bytecode::LdFalse,
+                        SignatureToken::ByteArray => {
+                            Bytecode::LdByteArray(ByteArrayPoolIndex::new(0))
+                        }
+                        _ => unimplemented!("Unsupported return type: {:#?}", token_type),
+                    };
+                    state_f = self.apply_instruction(state_f, &mut bytecode, next_instruction);
+                }
+                self.apply_instruction(state_f, &mut bytecode, Bytecode::Ret);
+            }
+            debug!("Instructions generated: {}", bytecode.len());
+            block.set_instructions(bytecode);
+        }
+
+        cfg.serialize()
     }
 }

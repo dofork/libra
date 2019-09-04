@@ -11,11 +11,11 @@ use admission_control_proto::{
     },
     AdmissionControlStatus, SubmitTransactionResponse,
 };
+use crypto::ed25519::*;
 use failure::prelude::*;
 use futures::Future;
 use grpcio::{CallOption, ChannelBuilder, EnvBuilder};
 use logger::prelude::*;
-use nextgen_crypto::ed25519::*;
 use proto_conv::{FromProto, IntoProto};
 use std::sync::Arc;
 use types::{
@@ -277,7 +277,7 @@ impl GRPCClient {
         start_event_seq_num: u64,
         ascending: bool,
         limit: u64,
-    ) -> Result<(Vec<EventWithProof>, Option<AccountStateWithProof>)> {
+    ) -> Result<(Vec<EventWithProof>, AccountStateWithProof)> {
         let req_item = RequestItem::GetEventsByEventAccessPath {
             access_path,
             start_event_seq_num,

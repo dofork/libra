@@ -5,8 +5,12 @@ use crate::{
     account_address::AccountAddress,
     byte_array::ByteArray,
     proto::transaction::{TransactionArgument as ProtoArgument, TransactionArgument_ArgType},
+    transaction::transaction_argument::TransactionArgument,
 };
 use byteorder::{LittleEndian, WriteBytesExt};
+use canonical_serialization::{
+    CanonicalDeserialize, CanonicalDeserializer, CanonicalSerialize, CanonicalSerializer,
+};
 use failure::prelude::*;
 use proto_conv::{FromProto, IntoProto};
 use serde::{Deserialize, Serialize};
@@ -142,23 +146,21 @@ impl IntoProto for Program {
     }
 }
 
-#[derive(Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
-pub enum TransactionArgument {
-    U64(u64),
-    Address(AccountAddress),
-    ByteArray(ByteArray),
-    String(String),
+impl CanonicalSerialize for Program {
+    fn serialize(&self, serializer: &mut impl CanonicalSerializer) -> Result<()> {
+        serializer.encode_vec(&self.code)?;
+        serializer.encode_vec(&self.args)?;
+        serializer.encode_vec(&self.modules)?;
+        Ok(())
+    }
 }
 
-impl fmt::Debug for TransactionArgument {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TransactionArgument::U64(value) => write!(f, "{{U64: {}}}", value),
-            TransactionArgument::Address(address) => write!(f, "{{ADDRESS: {:?}}}", address),
-            TransactionArgument::String(string) => write!(f, "{{STRING: {}}}", string),
-            TransactionArgument::ByteArray(byte_array) => {
-                write!(f, "{{ByteArray: 0x{}}}", byte_array)
-            }
-        }
+impl CanonicalDeserialize for Program {
+    fn deserialize(deserializer: &mut impl CanonicalDeserializer) -> Result<Self> {
+        let code: Vec<u8> = deserializer.decode_vec()?;
+        let args: Vec<TransactionArgument> = deserializer.decode_vec()?;
+        let modules: Vec<Vec<u8>> = deserializer.decode_vec()?;
+
+        Ok(Program::new(code, modules, args))
     }
 }

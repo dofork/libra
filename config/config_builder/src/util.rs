@@ -5,8 +5,8 @@ use config::{
     config::{NodeConfig, NodeConfigHelpers},
     trusted_peers::{TrustedPeersConfig, TrustedPeersConfigHelpers},
 };
+use crypto::{ed25519::*, test_utils::KeyPair};
 use failure::prelude::*;
-use nextgen_crypto::{ed25519::*, test_utils::KeyPair};
 use proto_conv::IntoProtoBytes;
 use rand::{Rng, SeedableRng};
 use std::{convert::TryFrom, fs::File, io::prelude::*, path::Path};
@@ -24,7 +24,7 @@ pub fn gen_genesis_transaction<P: AsRef<Path>>(
         .map(|(peer_id, peer)| {
             ValidatorPublicKeys::new(
                 AccountAddress::try_from(peer_id.clone()).expect("[config] invalid peer_id"),
-                peer.get_consensus_public().clone(),
+                peer.get_consensus_public().clone().unwrap(),
                 peer.get_network_signing_public().clone(),
                 peer.get_network_identity_public().clone(),
             )

@@ -7,6 +7,8 @@ pub mod account_config;
 pub mod account_state_blob;
 pub mod byte_array;
 pub mod contract_event;
+pub mod crypto_proxies;
+pub mod event;
 pub mod get_with_proof;
 pub mod language_storage;
 pub mod ledger_info;
@@ -14,7 +16,8 @@ pub mod proof;
 #[cfg(any(test, feature = "testing"))]
 pub mod proptest_types;
 pub mod proto;
-//pub mod test_helpers;
+#[cfg(any(test, feature = "testing"))]
+pub mod test_helpers;
 pub mod transaction;
 pub mod transaction_helpers;
 pub mod validator_change;

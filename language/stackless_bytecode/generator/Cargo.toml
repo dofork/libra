@@ -7,10 +7,9 @@ publish = false
 edition = "2018"
 
 [dependencies]
-bytecode_verifier = { path = "../../bytecode_verifier" }
 vm = { path = "../../vm" }
-types = { path = "../../../types" }
 ir_to_bytecode = { path = "../../compiler/ir_to_bytecode" }
+stdlib = { path = "../../stdlib" }
 #
 [dev-dependencies]
 # invalid_mutations = { path = "invalid_mutations" }

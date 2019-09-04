@@ -3,9 +3,7 @@
 
 use crate::{
     chained_bft::{
-        block_storage::{
-            block_tree::BlockTree, BlockReader, BlockTreeError, InsertError, VoteReceptionResult,
-        },
+        block_storage::{block_tree::BlockTree, BlockReader, InsertError, VoteReceptionResult},
         common::{Payload, Round},
         consensus_types::{block::Block, quorum_cert::QuorumCert},
         persistent_storage::PersistentStorage,
@@ -19,12 +17,11 @@ use logger::prelude::*;
 use crate::{chained_bft::persistent_storage::RecoveryData, state_replication::StateComputeResult};
 use crypto::hash::CryptoHash;
 use mirai_annotations::checked_precondition;
-use nextgen_crypto::ed25519::*;
 use std::{
     collections::{vec_deque::VecDeque, HashMap},
     sync::{Arc, RwLock},
 };
-use types::{ledger_info::LedgerInfo, validator_signer::ValidatorSigner};
+use types::{crypto_proxies::ValidatorSigner, ledger_info::LedgerInfo};
 
 #[cfg(test)]
 #[path = "block_store_test.rs"]
@@ -57,7 +54,7 @@ pub enum NeedFetchResult {
 ///             | -------------> D3
 pub struct BlockStore<T> {
     inner: Arc<RwLock<BlockTree<T>>>,
-    validator_signer: ValidatorSigner<Ed25519PrivateKey>,
+    validator_signer: ValidatorSigner,
     state_computer: Arc<dyn StateComputer<Payload = T>>,
     enforce_increasing_timestamps: bool,
     /// The persistent storage backing up the in-memory data structure, every write should go
@@ -69,7 +66,7 @@ impl<T: Payload> BlockStore<T> {
     pub async fn new(
         storage: Arc<dyn PersistentStorage<T>>,
         initial_data: RecoveryData<T>,
-        validator_signer: ValidatorSigner<Ed25519PrivateKey>,
+        validator_signer: ValidatorSigner,
         state_computer: Arc<dyn StateComputer<Payload = T>>,
         enforce_increasing_timestamps: bool,
         max_pruned_blocks_in_mem: usize,
@@ -161,7 +158,7 @@ impl<T: Payload> BlockStore<T> {
         *self.inner.write().unwrap() = tree;
     }
 
-    pub fn signer(&self) -> &ValidatorSigner<Ed25519PrivateKey> {
+    pub fn signer(&self) -> &ValidatorSigner {
         &self.validator_signer
     }
 
@@ -223,6 +220,10 @@ impl<T: Payload> BlockStore<T> {
         committed_block_id: HashValue,
         qc: &QuorumCert,
     ) -> bool {
+        // This precondition ensures that the check in the following lines
+        // does not result in an addition overflow.
+        checked_precondition!(self.root().round() < std::u64::MAX - 1);
+
         // LedgerInfo doesn't carry the information about the round of the committed block. However,
         // the 3-chain safety rules specify that the round of the committed block must be
         // certified_block_round() - 2. In case root().round() is greater than that the committed
@@ -395,16 +396,9 @@ impl<T: Payload> BlockStore<T> {
         if parent.round() >= block.round() {
             return Err(InsertError::InvalidBlockRound);
         }
-        if self.enforce_increasing_timestamps {
-            // NIL blocks are supposed to have timestamps equal to their parents. Proposed blocks
-            // must have increasing timestamps.
-            if block.is_nil_block() {
-                if block.timestamp_usecs() != parent.timestamp_usecs() {
-                    return Err(InsertError::InvalidNilBlockTimestamp);
-                }
-            } else if block.timestamp_usecs() <= parent.timestamp_usecs() {
-                return Err(InsertError::NonIncreasingTimestamp);
-            }
+        if self.enforce_increasing_timestamps && block.timestamp_usecs() <= parent.timestamp_usecs()
+        {
+            return Err(InsertError::NonIncreasingTimestamp);
         }
         let parent_id = parent.id();
         match self.inner.read().unwrap().get_state_for_block(parent_id) {
@@ -442,14 +436,6 @@ impl<T: Payload> BlockReader for BlockStore<T> {
             .read()
             .unwrap()
             .get_quorum_cert_for_block(block_id)
-    }
-
-    fn is_ancestor(
-        &self,
-        ancestor: &Block<Self::Payload>,
-        block: &Block<Self::Payload>,
-    ) -> Result<bool, BlockTreeError> {
-        self.inner.read().unwrap().is_ancestor(ancestor, block)
     }
 
     fn path_from_root(&self, block: Arc<Block<T>>) -> Option<Vec<Arc<Block<T>>>> {

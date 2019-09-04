@@ -10,11 +10,10 @@ use canonical_serialization::{
 };
 use crypto::{
     hash::{AccountAddressHasher, CryptoHash, CryptoHasher},
-    HashValue,
+    HashValue, VerifyingKey,
 };
 use failure::prelude::*;
 use hex;
-use nextgen_crypto::VerifyingKey;
 #[cfg(any(test, feature = "testing"))]
 use proptest_derive::Arbitrary;
 use proto_conv::{FromProto, IntoProto};
@@ -246,14 +245,14 @@ impl TryFrom<AccountAddress> for Bech32 {
 
 impl CanonicalSerialize for AccountAddress {
     fn serialize(&self, serializer: &mut impl CanonicalSerializer) -> Result<()> {
-        serializer.encode_variable_length_bytes(&self.0)?;
+        serializer.encode_bytes(&self.0)?;
         Ok(())
     }
 }
 
 impl CanonicalDeserialize for AccountAddress {
     fn deserialize(deserializer: &mut impl CanonicalDeserializer) -> Result<Self> {
-        let bytes = deserializer.decode_variable_length_bytes()?;
+        let bytes = deserializer.decode_bytes()?;
         Self::try_from(bytes)
     }
 }

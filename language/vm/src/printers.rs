@@ -75,7 +75,7 @@ pub trait TableAccess {
     fn get_struct_at(&self, idx: StructHandleIndex) -> Result<&StructHandle>;
     fn get_function_at(&self, idx: FunctionHandleIndex) -> Result<&FunctionHandle>;
 
-    fn get_string_at(&self, idx: StringPoolIndex) -> Result<&String>;
+    fn get_string_at(&self, idx: StringPoolIndex) -> Result<&str>;
     fn get_address_at(&self, idx: AddressPoolIndex) -> Result<&AccountAddress>;
     fn get_type_signature_at(&self, idx: TypeSignatureIndex) -> Result<&TypeSignature>;
     fn get_function_signature_at(&self, idx: FunctionSignatureIndex) -> Result<&FunctionSignature>;
@@ -108,7 +108,7 @@ impl TableAccess for CompiledScriptMut {
         }
     }
 
-    fn get_string_at(&self, idx: StringPoolIndex) -> Result<&String> {
+    fn get_string_at(&self, idx: StringPoolIndex) -> Result<&str> {
         match self.string_pool.get(idx.0 as usize) {
             None => bail!("bad string index {}", idx),
             Some(s) => Ok(s),
@@ -173,7 +173,7 @@ impl TableAccess for CompiledModuleMut {
         }
     }
 
-    fn get_string_at(&self, idx: StringPoolIndex) -> Result<&String> {
+    fn get_string_at(&self, idx: StringPoolIndex) -> Result<&str> {
         match self.string_pool.get(idx.0 as usize) {
             None => bail!("bad string index {}", idx),
             Some(s) => Ok(s),
@@ -569,7 +569,7 @@ fn display_locals_signature<T: TableAccess>(
     Ok(())
 }
 
-fn display_type_parameters<T: TableAccess>(
+fn display_type_actuals<T: TableAccess>(
     types: &[SignatureToken],
     tables: &T,
     f: &mut fmt::Formatter,
@@ -600,7 +600,7 @@ fn display_signature_token<T: TableAccess>(
         SignatureToken::Address => write!(f, "Address"),
         SignatureToken::Struct(idx, types) => {
             display_struct_handle(tables.get_struct_at(*idx).unwrap(), tables, f)?;
-            display_type_parameters(&types, tables, f)
+            display_type_actuals(&types, tables, f)
         }
         SignatureToken::Reference(token) => {
             write!(f, "&")?;
@@ -636,14 +636,19 @@ fn display_bytecode<T: TableAccess>(
             write!(f, ")")
         }
         Bytecode::LdStr(idx) => write!(f, "LdStr({})", tables.get_string_at(*idx).unwrap()),
-        Bytecode::BorrowField(idx) => {
-            write!(f, "BorrowField(")?;
+        Bytecode::MutBorrowField(idx) => {
+            write!(f, "MutBorrowField(")?;
+            display_field_definition(tables.get_field_def_at(*idx).unwrap(), tables, f)?;
+            write!(f, ")")
+        }
+        Bytecode::ImmBorrowField(idx) => {
+            write!(f, "ImmBorrowField(")?;
             display_field_definition(tables.get_field_def_at(*idx).unwrap(), tables, f)?;
             write!(f, ")")
         }
         Bytecode::Call(idx, types_idx) => {
             write!(f, "Call")?;
-            display_type_parameters(
+            display_type_actuals(
                 &tables.get_locals_signature_at(*types_idx).unwrap().0,
                 tables,
                 f,

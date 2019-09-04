@@ -4,7 +4,7 @@
 use crate::{
     chained_bft::{
         common::{Author, Height, Round},
-        consensus_types::quorum_cert::QuorumCert,
+        consensus_types::{quorum_cert::QuorumCert, vote_data::VoteData},
         safety::vote_msg::VoteMsgVerificationError,
     },
     state_replication::ExecutedState,
@@ -17,9 +17,8 @@ use crypto::{
     HashValue,
 };
 use failure::Result;
-use mirai_annotations::{checked_precondition, checked_precondition_eq};
+use mirai_annotations::{assumed_postcondition, checked_precondition, checked_precondition_eq};
 use network::proto::Block as ProtoBlock;
-use nextgen_crypto::ed25519::*;
 use proto_conv::{FromProto, IntoProto};
 use rmp_serde::{from_slice, to_vec_named};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -29,9 +28,8 @@ use std::{
     fmt::{Display, Formatter},
 };
 use types::{
-    ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
-    validator_signer::ValidatorSigner,
-    validator_verifier::ValidatorVerifier,
+    crypto_proxies::{LedgerInfoWithSignatures, Signature, ValidatorSigner, ValidatorVerifier},
+    ledger_info::LedgerInfo,
 };
 
 #[cfg(test)]
@@ -60,7 +58,7 @@ pub enum BlockSource {
         /// Author of the block that can be validated by the author's public key and the signature
         author: Author,
         /// Signature that the hash of this block has been authored by the owner of the private key
-        signature: Ed25519Signature,
+        signature: Signature,
     },
     /// NIL blocks don't have authors or signatures: they're generated upon timeouts to fill in the
     /// gaps in the rounds.
@@ -129,14 +127,12 @@ where
     // Make an empty genesis block
     pub fn make_genesis_block() -> Self {
         let ancestor_id = HashValue::zero();
-        let genesis_validator_signer = ValidatorSigner::<Ed25519PrivateKey>::genesis();
+        let genesis_validator_signer = ValidatorSigner::genesis();
         let state = ExecutedState::state_for_genesis();
         // Genesis carries a placeholder quorum certificate to its parent id with LedgerInfo
         // carrying information about version `0`.
         let genesis_quorum_cert = QuorumCert::new(
-            ancestor_id,
-            state,
-            0,
+            VoteData::new(ancestor_id, state, 0, ancestor_id, 0, ancestor_id, 0),
             LedgerInfoWithSignatures::new(
                 LedgerInfo::new(
                     0,
@@ -148,10 +144,6 @@ where
                 ),
                 HashMap::new(),
             ),
-            ancestor_id,
-            0,
-            ancestor_id,
-            0,
         );
         let genesis_id = *GENESIS_BLOCK_ID;
         let signature = genesis_validator_signer
@@ -168,7 +160,7 @@ where
             quorum_cert: genesis_quorum_cert,
             block_source: BlockSource::Proposal {
                 author: genesis_validator_signer.author(),
-                signature,
+                signature: signature.into(),
             },
         }
     }
@@ -182,7 +174,7 @@ where
         height: Height,
         timestamp_usecs: u64,
         quorum_cert: QuorumCert,
-        validator_signer: &ValidatorSigner<Ed25519PrivateKey>,
+        validator_signer: &ValidatorSigner,
     ) -> Self {
         let block_internal = BlockSerializer {
             parent_id,
@@ -209,7 +201,7 @@ where
             quorum_cert,
             block_source: BlockSource::Proposal {
                 author: validator_signer.author(),
-                signature,
+                signature: signature.into(),
             },
         }
     }
@@ -220,11 +212,15 @@ where
         round: Round,
         timestamp_usecs: u64,
         quorum_cert: QuorumCert,
-        validator_signer: &ValidatorSigner<Ed25519PrivateKey>,
+        validator_signer: &ValidatorSigner,
     ) -> Self {
         // A block must carry a QC to its parent.
         checked_precondition_eq!(quorum_cert.certified_block_id(), parent_block.id());
         checked_precondition!(round > parent_block.round());
+
+        // This precondition guards the addition overflow caused by passing
+        // parent_block.height() + 1 to new_internal.
+        checked_precondition!(parent_block.height() < std::u64::MAX);
         Block::new_internal(
             payload,
             parent_block.id(),
@@ -243,11 +239,17 @@ where
         checked_precondition_eq!(quorum_cert.certified_block_id(), parent_block.id());
         checked_precondition!(round > parent_block.round());
 
+        // This precondition guards the addition overflow caused by using
+        // parent_block.height() + 1 in the construction of BlockSerializer.
+        checked_precondition!(parent_block.height() < std::u64::MAX);
+
         let payload = T::default();
         // We want all the NIL blocks to agree on the timestamps even though they're generated
-        // independently by different validators, hence we're using the timestamp of a parent.
-        let timestamp_usecs = parent_block.timestamp_usecs;
-
+        // independently by different validators, hence we're using the timestamp of a parent + 1.
+        // The reason for artificially adding 1 usec is to support execution state synchronization,
+        // which doesn't have any other way of determining the order of ledger infos rather than
+        // comparing their timestamps.
+        let timestamp_usecs = parent_block.timestamp_usecs + 1;
         let block_serializer = BlockSerializer {
             parent_id: parent_block.id(),
             payload: &payload,
@@ -280,7 +282,7 @@ where
 
     pub fn verify(
         &self,
-        validator: &ValidatorVerifier<Ed25519PublicKey>,
+        validator: &ValidatorVerifier,
     ) -> ::std::result::Result<(), BlockVerificationError> {
         if self.is_genesis_block() {
             return Ok(());
@@ -297,8 +299,8 @@ where
             return Err(BlockVerificationError::InvalidBlockRound);
         }
         if let BlockSource::Proposal { author, signature } = &self.block_source {
-            validator
-                .verify_signature(*author, self.hash(), signature)
+            signature
+                .verify(validator, *author, self.hash())
                 .map_err(|_| BlockVerificationError::SigVerifyError)?;
         } else if self.payload != T::default() {
             // NIL block must not carry payload
@@ -318,10 +320,22 @@ where
     }
 
     pub fn height(&self) -> Height {
+        // Height:
+        // - Reasonable to assume that the height of the block chain will not grow enough to exceed
+        // std::u64::MAX - 1 in the next million years at least
+        // - The upper limit of std::u64::MAX - 1 ensures that the parent check doesn't
+        // cause addition overflow.
+        // (Block::make_block)
+        assumed_postcondition!(self.height < std::u64::MAX);
         self.height
     }
 
     pub fn round(&self) -> Round {
+        // Round numbers:
+        // - are reset to 0 periodically.
+        // - do not exceed std::u64::MAX - 2 per the 3 chain safety rule
+        // (ConsensusState::commit_rule_for_certified_block)
+        assumed_postcondition!(self.round < std::u64::MAX - 1);
         self.round
     }
 
@@ -341,7 +355,7 @@ where
         }
     }
 
-    pub fn signature(&self) -> Option<&Ed25519Signature> {
+    pub fn signature(&self) -> Option<&Signature> {
         if let BlockSource::Proposal { signature, .. } = &self.block_source {
             Some(signature)
         } else {
@@ -425,8 +439,8 @@ where
             .encode_u64(self.round)?
             .encode_u64(self.height)?
             .encode_struct(self.payload)?
-            .encode_raw_bytes(self.parent_id.as_ref())?
-            .encode_raw_bytes(self.quorum_cert.certified_block_id().as_ref())?
+            .encode_bytes(self.parent_id.as_ref())?
+            .encode_bytes(self.quorum_cert.certified_block_id().as_ref())?
             .encode_optional(&self.author)?;
         Ok(())
     }
@@ -463,7 +477,8 @@ where
         proto.set_height(self.height());
         proto.set_quorum_cert(self.quorum_cert().clone().into_proto());
         if let BlockSource::Proposal { author, signature } = self.block_source {
-            proto.set_signature(signature.to_bytes().as_ref().into());
+            let bytes = bytes::Bytes::from(&signature.to_bytes()[..]);
+            proto.set_signature(bytes);
             proto.set_author(author.into());
         }
         proto
@@ -489,7 +504,7 @@ where
         } else {
             BlockSource::Proposal {
                 author: Author::try_from(object.get_author())?,
-                signature: Ed25519Signature::try_from(object.get_signature())?,
+                signature: Signature::try_from(object.get_signature())?,
             }
         };
         Ok(Block {

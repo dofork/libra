@@ -12,15 +12,19 @@ use execution_proto::proto::{
     execution_grpc::ExecutionClient,
 };
 use failure::Result;
-use futures::{compat::Future01CompatExt, Future, FutureExt};
+use futures::{compat::Future01CompatExt, future, Future, FutureExt};
 use logger::prelude::*;
-use nextgen_crypto::ed25519::*;
 use proto_conv::{FromProto, IntoProto};
-use state_synchronizer::{StateSyncClient, SyncStatus};
-use std::{pin::Pin, sync::Arc, time::Instant};
+use state_synchronizer::StateSyncClient;
+use std::{
+    convert::TryFrom,
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use types::{
-    ledger_info::LedgerInfoWithSignatures,
-    transaction::{SignedTransaction, TransactionListWithProof, TransactionStatus},
+    crypto_proxies::LedgerInfoWithSignatures,
+    transaction::{SignedTransaction, TransactionStatus},
 };
 
 /// Basic communication with the Execution module;
@@ -44,15 +48,21 @@ impl ExecutionProxy {
     ) -> StateComputeResult {
         let execution_block_response = execution_proto::ExecuteBlockResponse::from_proto(response)
             .expect("Couldn't decode ExecutionBlockResponse from protobuf");
-        let execution_duration_ms = pre_execution_instant.elapsed().as_millis();
+        let execution_duration = pre_execution_instant.elapsed();
         let num_txns = execution_block_response.status().len();
         if num_txns == 0 {
             // no txns in that block
-            counters::EMPTY_BLOCK_EXECUTION_DURATION_MS.observe(execution_duration_ms as f64);
+            counters::EMPTY_BLOCK_EXECUTION_DURATION_S.observe_duration(execution_duration);
         } else {
-            counters::BLOCK_EXECUTION_DURATION_MS.observe(execution_duration_ms as f64);
-            let per_txn_duration = (execution_duration_ms as f64) / (num_txns as f64);
-            counters::TXN_EXECUTION_DURATION_MS.observe(per_txn_duration);
+            counters::BLOCK_EXECUTION_DURATION_S.observe_duration(execution_duration);
+            if let Ok(nanos_per_txn) =
+                u64::try_from(execution_duration.as_nanos() / num_txns as u128)
+            {
+                // TODO: use duration_float once it's stable
+                // Tracking: https://github.com/rust-lang/rust/issues/54361
+                counters::TXN_EXECUTION_DURATION_S
+                    .observe_duration(Duration::from_nanos(nanos_per_txn));
+            }
         }
         let mut compute_status = vec![];
         let mut num_successful_txns = 0;
@@ -113,14 +123,14 @@ impl StateComputer for ExecutionProxy {
                 }
                     .boxed()
             }
-            Err(e) => async move { Err(e.into()) }.boxed(),
+            Err(e) => future::err(e.into()).boxed(),
         }
     }
 
     /// Send a successful commit. A future is fulfilled when the state is finalized.
     fn commit(
         &self,
-        commit: LedgerInfoWithSignatures<Ed25519Signature>,
+        commit: LedgerInfoWithSignatures,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
         let version = commit.ledger_info().version();
         counters::LAST_COMMITTED_VERSION.set(version as i64);
@@ -136,9 +146,8 @@ impl StateComputer for ExecutionProxy {
                     match receiver.compat().await {
                         Ok(response) => {
                             if response.get_status() == CommitBlockStatus::SUCCEEDED {
-                                let commit_duration_ms = pre_commit_instant.elapsed().as_millis();
-                                counters::BLOCK_COMMIT_DURATION_MS
-                                    .observe(commit_duration_ms as f64);
+                                counters::BLOCK_COMMIT_DURATION_S
+                                    .observe_duration(pre_commit_instant.elapsed());
                                 if let Err(e) = synchronizer.commit(version).await {
                                     error!("failed to notify state synchronizer: {:?}", e);
                                 }
@@ -156,29 +165,15 @@ impl StateComputer for ExecutionProxy {
                 }
                     .boxed()
             }
-            Err(e) => async move { Err(e.into()) }.boxed(),
+            Err(e) => future::err(e.into()).boxed(),
         }
     }
 
     /// Synchronize to a commit that not present locally.
-    fn sync_to(
-        &self,
-        commit: QuorumCert,
-    ) -> Pin<Box<dyn Future<Output = Result<SyncStatus>> + Send>> {
+    fn sync_to(&self, commit: QuorumCert) -> Pin<Box<dyn Future<Output = Result<bool>> + Send>> {
         counters::STATE_SYNC_COUNT.inc();
         self.synchronizer
             .sync_to(commit.ledger_info().clone())
-            .boxed()
-    }
-
-    fn get_chunk(
-        &self,
-        start_version: u64,
-        target_version: u64,
-        batch_size: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<TransactionListWithProof>> + Send>> {
-        self.synchronizer
-            .get_chunk(start_version, target_version, batch_size)
             .boxed()
     }
 }

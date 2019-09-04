@@ -14,13 +14,12 @@ mod chained_bft_smr;
 mod event_processor;
 mod network;
 
+pub mod epoch_manager;
 pub mod persistent_storage;
 mod sync_manager;
 
 #[cfg(test)]
 mod chained_bft_smr_test;
-#[cfg(test)]
-mod event_processor_test;
 #[cfg(test)]
 mod network_tests;
 #[cfg(test)]

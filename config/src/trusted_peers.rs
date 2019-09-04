@@ -1,7 +1,7 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use nextgen_crypto::{
+use crypto::{
     ed25519::{compat, *},
     traits::ValidKeyStringExt,
     x25519::{self, X25519StaticPrivateKey, X25519StaticPublicKey},
@@ -9,9 +9,10 @@ use nextgen_crypto::{
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     convert::TryFrom,
     fs::File,
+    hash::BuildHasher,
     io::{Read, Write},
     path::Path,
 };
@@ -31,20 +32,26 @@ pub struct TrustedPeer {
     #[serde(deserialize_with = "deserialize_key")]
     #[serde(rename = "ni")]
     network_identity_pubkey: X25519StaticPublicKey,
-    #[serde(serialize_with = "serialize_key")]
-    #[serde(deserialize_with = "deserialize_key")]
+    #[serde(serialize_with = "serialize_opt_key")]
+    #[serde(deserialize_with = "deserialize_opt_key")]
     #[serde(rename = "c")]
-    consensus_pubkey: Ed25519PublicKey,
+    consensus_pubkey: Option<Ed25519PublicKey>,
 }
 
 pub struct TrustedPeerPrivateKeys {
     network_signing_private_key: Ed25519PrivateKey,
     network_identity_private_key: X25519StaticPrivateKey,
-    consensus_private_key: Ed25519PrivateKey,
+    consensus_private_key: Option<Ed25519PrivateKey>,
 }
 
 impl TrustedPeerPrivateKeys {
-    pub fn get_key_triplet(self) -> (Ed25519PrivateKey, X25519StaticPrivateKey, Ed25519PrivateKey) {
+    pub fn get_key_triplet(
+        self,
+    ) -> (
+        Ed25519PrivateKey,
+        X25519StaticPrivateKey,
+        Option<Ed25519PrivateKey>,
+    ) {
         (
             self.network_signing_private_key,
             self.network_identity_private_key,
@@ -60,7 +67,7 @@ impl TrustedPeer {
     pub fn get_network_identity_public(&self) -> &X25519StaticPublicKey {
         &self.network_identity_pubkey
     }
-    pub fn get_consensus_public(&self) -> &Ed25519PublicKey {
+    pub fn get_consensus_public(&self) -> &Option<Ed25519PublicKey> {
         &self.consensus_pubkey
     }
 }
@@ -115,7 +122,20 @@ where
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrustedPeersConfig {
     #[serde(flatten)]
+    #[serde(serialize_with = "serialize_ordered_map")]
     pub peers: HashMap<String, TrustedPeer>,
+}
+
+pub fn serialize_ordered_map<S, H>(
+    value: &HashMap<String, TrustedPeer, H>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+    H: BuildHasher,
+{
+    let ordered: BTreeMap<_, _> = value.iter().collect();
+    ordered.serialize(serializer)
 }
 
 impl TrustedPeersConfig {
@@ -145,7 +165,7 @@ impl TrustedPeersConfig {
             .clone()
     }
 
-    pub fn get_consensus_keys(&self, peer_id: &str) -> Ed25519PublicKey {
+    pub fn get_consensus_keys(&self, peer_id: &str) -> Option<Ed25519PublicKey> {
         self.get_public_keys(peer_id).consensus_pubkey
     }
 
@@ -161,10 +181,13 @@ impl TrustedPeersConfig {
     pub fn get_trusted_consensus_peers(&self) -> HashMap<AccountAddress, Ed25519PublicKey> {
         let mut res = HashMap::new();
         for (account, keys) in &self.peers {
-            res.insert(
-                AccountAddress::try_from(account.clone()).expect("Failed to parse account addr"),
-                keys.consensus_pubkey.clone(),
-            );
+            if let Some(ref consensus_pubkey) = keys.consensus_pubkey {
+                res.insert(
+                    AccountAddress::try_from(account.clone())
+                        .expect("Failed to parse account addr"),
+                    consensus_pubkey.clone(),
+                );
+            }
         }
         res
     }
@@ -230,15 +253,15 @@ impl TrustedPeersConfigHelpers {
             let peer = TrustedPeer {
                 network_signing_pubkey: public0,
                 network_identity_pubkey: public1,
-                consensus_pubkey: public2,
+                consensus_pubkey: Some(public2.clone()),
             };
-            let peer_id = AccountAddress::from_public_key(&peer.consensus_pubkey);
+            let peer_id = AccountAddress::from_public_key(&public2);
             peers.insert(peer_id.to_string(), peer);
             // save the private keys in a different hashmap
             let private_keys = TrustedPeerPrivateKeys {
                 network_signing_private_key: private0,
                 network_identity_private_key: private1,
-                consensus_private_key: private2,
+                consensus_private_key: Some(private2),
             };
             peers_private_keys.insert(peer_id.to_string(), private_keys);
         }

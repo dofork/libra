@@ -6,7 +6,7 @@ use crate::{
     code_cache::module_cache::ModuleCache, execution_stack::ExecutionStack,
     loaded_data::function::FunctionReference,
 };
-use types::account_address::ADDRESS_LENGTH;
+use types::{account_address::ADDRESS_LENGTH, transaction::MAX_TRANSACTION_SIZE_IN_BYTES};
 use vm::{access::ModuleAccess, errors::*, file_format::Bytecode, gas_schedule::*};
 use vm_runtime_types::value::Local;
 
@@ -46,6 +46,7 @@ impl GasMeter {
         'alloc: 'txn,
         P: ModuleCache<'alloc>,
     {
+        precondition!(transaction_size.get() <= (MAX_TRANSACTION_SIZE_IN_BYTES as u64));
         let cost = calculate_intrinsic_gas(transaction_size);
         self.consume_gas(cost, stk)
     }
@@ -119,8 +120,6 @@ impl GasMeter {
             | Bytecode::Or
             | Bytecode::And
             | Bytecode::Not
-            | Bytecode::Eq
-            | Bytecode::Neq
             | Bytecode::Lt
             | Bytecode::Gt
             | Bytecode::Le
@@ -139,10 +138,27 @@ impl GasMeter {
             | Bytecode::GetTxnSenderAddress
             | Bytecode::GetTxnSequenceNumber
             | Bytecode::Ge
-            | Bytecode::EmitEvent
-            | Bytecode::FreezeRef => {
+            // Releasing and freezing a reference is not dependent on the size of the underlying data
+            | Bytecode::FreezeRef
+            // Neither is borrowing local data dependent upon the size of the data
+            | Bytecode::MutBorrowLoc(_)
+            | Bytecode::ImmBorrowLoc(_)
+            | Bytecode::MutBorrowField(_)
+            | Bytecode::ImmBorrowField(_)
+            // A return does not affect the value stack at all, and simply pops the call stack
+            // -- the callee's frame then knows that the return value(s) will be at the top of the
+            // value stack.  Because of this, the cost of the instruction is not dependent upon the
+            // size of the value being returned.
+            | Bytecode::Ret => {
                 let default_gas = static_cost_instr(instr, AbstractMemorySize::new(1));
                 Self::gas_of(default_gas)
+            }
+            Bytecode::Eq
+            | Bytecode::Neq => {
+                let lhs_size = stk.peek()?.size();
+                let rhs_size = stk.peek_at(1)?.size();
+                let max_size = lhs_size.map2(rhs_size, std::cmp::max);
+                Self::gas_of(static_cost_instr(instr, max_size))
             }
             Bytecode::LdAddr(_) => {
                 let size = AbstractMemorySize::new(ADDRESS_LENGTH as GasCarrier);
@@ -177,14 +193,6 @@ impl GasMeter {
                 let local = stk.top_frame()?.get_local(*local_idx)?;
                 let size = local.size();
                 let default_gas = static_cost_instr(instr, size);
-                Self::gas_of(default_gas)
-            }
-            // A return does not affect the value stack at all, and simply pops the call stack
-            // -- the callee's frame then knows that the return value(s) will be at the top of the
-            // value stack.  Because of this, the cost of the instruction is not dependent upon the
-            // size of the value being returned.
-            Bytecode::Ret => {
-                let default_gas = static_cost_instr(instr, AbstractMemorySize::new(1));
                 Self::gas_of(default_gas)
             }
             Bytecode::Call(call_idx, _) => {
@@ -244,7 +252,7 @@ impl GasMeter {
                 };
                 Self::gas_of(default_gas)
             }
-            | Bytecode::ReadRef => {
+            Bytecode::ReadRef => {
                 // NB: We don't charge for reads from global memory: we charge once for the read
                 // from global memory that is performed by a BorrowGlobal operation. After this,
                 // all ReadRefs will be reading from local cache and we don't need to distinguish.
@@ -252,16 +260,7 @@ impl GasMeter {
                 let default_gas = static_cost_instr(instr, size);
                 Self::gas_of(default_gas)
             }
-            | Bytecode::BorrowLoc(_)
-            | Bytecode::BorrowField(_) => {
-                let default_gas = static_cost_instr(instr, AbstractMemorySize::new(1));
-                Self::gas_of(default_gas)
-            }
             Bytecode::CreateAccount => Self::gas_of(static_cost_instr(instr, *DEFAULT_ACCOUNT_SIZE)),
-            // Releasing a reference is not dependent on the size of the underlying data
-            Bytecode::ReleaseRef => {
-                Self::gas_of(static_cost_instr(instr, AbstractMemorySize::new(1)))
-            }
             // Note that we charge twice for these operations; once at the start of
             // `execute_single_instruction` we charge once with size 1. This then covers the cost
             // of accessing the value and guards (somewhat) against abusive memory accesses. Once

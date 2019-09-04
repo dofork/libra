@@ -9,21 +9,21 @@
 
 mod state_view;
 
+use crypto::ed25519::*;
 use failure::prelude::*;
 use futures::{compat::Future01CompatExt, executor::block_on, prelude::*};
 use futures_01::future::Future as Future01;
 use grpcio::{ChannelBuilder, Environment};
 use metrics::counters::SVC_COUNTERS;
-use nextgen_crypto::ed25519::*;
 use proto_conv::{FromProto, IntoProto};
 use protobuf::Message;
 use rand::Rng;
 use std::{pin::Pin, sync::Arc};
 use storage_proto::{
-    proto::{storage::GetExecutorStartupInfoRequest, storage_grpc},
-    ExecutorStartupInfo, GetAccountStateWithProofByVersionRequest,
-    GetAccountStateWithProofByVersionResponse, GetExecutorStartupInfoResponse,
-    GetTransactionsRequest, GetTransactionsResponse, SaveTransactionsRequest,
+    proto::{storage::GetStartupInfoRequest, storage_grpc},
+    GetAccountStateWithProofByVersionRequest, GetAccountStateWithProofByVersionResponse,
+    GetStartupInfoResponse, GetTransactionsRequest, GetTransactionsResponse,
+    SaveTransactionsRequest, StartupInfo,
 };
 use types::{
     account_address::AccountAddress,
@@ -203,17 +203,17 @@ impl StorageRead for StorageReadServiceClient {
         .boxed()
     }
 
-    fn get_executor_startup_info(&self) -> Result<Option<ExecutorStartupInfo>> {
-        block_on(self.get_executor_startup_info_async())
+    fn get_startup_info(&self) -> Result<Option<StartupInfo>> {
+        block_on(self.get_startup_info_async())
     }
 
-    fn get_executor_startup_info_async(
+    fn get_startup_info_async(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<ExecutorStartupInfo>>> + Send>> {
-        let proto_req = GetExecutorStartupInfoRequest::new();
-        convert_grpc_response(self.client().get_executor_startup_info_async(&proto_req))
+    ) -> Pin<Box<dyn Future<Output = Result<Option<StartupInfo>>> + Send>> {
+        let proto_req = GetStartupInfoRequest::new();
+        convert_grpc_response(self.client().get_startup_info_async(&proto_req))
             .map(|resp| {
-                let resp = GetExecutorStartupInfoResponse::from_proto(resp?)?;
+                let resp = GetStartupInfoResponse::from_proto(resp?)?;
                 Ok(resp.info)
             })
             .boxed()
@@ -349,19 +349,19 @@ pub trait StorageRead: Send + Sync {
         version: Version,
     ) -> Pin<Box<dyn Future<Output = Result<(Option<AccountStateBlob>, SparseMerkleProof)>> + Send>>;
 
-    /// See [`LibraDB::get_executor_startup_info`].
+    /// See [`LibraDB::get_startup_info`].
     ///
-    /// [`LibraDB::get_executor_startup_info`]:
-    /// ../libradb/struct.LibraDB.html#method.get_executor_startup_info
-    fn get_executor_startup_info(&self) -> Result<Option<ExecutorStartupInfo>>;
+    /// [`LibraDB::get_startup_info`]:
+    /// ../libradb/struct.LibraDB.html#method.get_startup_info
+    fn get_startup_info(&self) -> Result<Option<StartupInfo>>;
 
-    /// See [`LibraDB::get_executor_startup_info`].
+    /// See [`LibraDB::get_startup_info`].
     ///
-    /// [`LibraDB::get_executor_startup_info`]:
-    /// ../libradb/struct.LibraDB.html#method.get_executor_startup_info
-    fn get_executor_startup_info_async(
+    /// [`LibraDB::get_startup_info`]:
+    /// ../libradb/struct.LibraDB.html#method.get_startup_info
+    fn get_startup_info_async(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<ExecutorStartupInfo>>> + Send>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Option<StartupInfo>>> + Send>>;
 }
 
 /// This trait defines interfaces to be implemented by a storage write client.

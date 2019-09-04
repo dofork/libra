@@ -67,6 +67,7 @@ pub struct FunctionDefinitionGen {
     name: PropIndex,
     signature: FunctionSignatureGen,
     is_public: bool,
+    acquires: Vec<PropIndex>,
     code: CodeUnitGen,
 }
 
@@ -75,6 +76,7 @@ impl FunctionDefinitionGen {
         return_count: impl Into<SizeRange>,
         arg_count: impl Into<SizeRange>,
         kind_count: impl Into<SizeRange>,
+        acquires_count: impl Into<SizeRange>,
         code_len: impl Into<SizeRange>,
     ) -> impl Strategy<Value = Self> {
         let return_count = return_count.into();
@@ -87,12 +89,14 @@ impl FunctionDefinitionGen {
                 kind_count.into(),
             ),
             any::<bool>(),
+            vec(any::<PropIndex>(), acquires_count.into()),
             CodeUnitGen::strategy(arg_count, code_len),
         )
-            .prop_map(|(name, signature, is_public, code)| Self {
+            .prop_map(|(name, signature, is_public, acquires, code)| Self {
                 name,
                 signature,
                 is_public,
+                acquires,
                 code,
             })
     }
@@ -115,7 +119,11 @@ impl FunctionDefinitionGen {
             signature: state.add_function_signature(signature),
         };
         let function_handle = state.add_function_handle(handle);
-
+        let acquires_global_resources = self
+            .acquires
+            .into_iter()
+            .map(|idx| StructDefinitionIndex::new(idx.index(state.struct_defs_len) as TableIndex))
+            .collect();
         FunctionDefinition {
             function: function_handle,
             // XXX is this even correct?
@@ -125,6 +133,7 @@ impl FunctionDefinitionGen {
                 // No qualifiers.
                 0
             },
+            acquires_global_resources,
             code: self.code.materialize(state),
         }
     }
@@ -190,7 +199,8 @@ enum BytecodeGen {
     LdAddr(PropIndex),
     LdStr(PropIndex),
     LdByteArray(PropIndex),
-    BorrowField(PropIndex),
+    MutBorrowField(PropIndex),
+    ImmBorrowField(PropIndex),
     Call(PropIndex, PropIndex),
     Pack(PropIndex, PropIndex),
     Unpack(PropIndex, PropIndex),
@@ -204,7 +214,8 @@ enum BytecodeGen {
     CopyLoc(PropIndex),
     MoveLoc(PropIndex),
     StLoc(PropIndex),
-    BorrowLoc(PropIndex),
+    MutBorrowLoc(PropIndex),
+    ImmBorrowLoc(PropIndex),
 }
 
 impl BytecodeGen {
@@ -218,7 +229,8 @@ impl BytecodeGen {
             any::<PropIndex>().prop_map(LdAddr),
             any::<PropIndex>().prop_map(LdStr),
             any::<PropIndex>().prop_map(LdByteArray),
-            any::<PropIndex>().prop_map(BorrowField),
+            any::<PropIndex>().prop_map(ImmBorrowField),
+            any::<PropIndex>().prop_map(MutBorrowField),
             (any::<PropIndex>(), any::<PropIndex>(),).prop_map(|(idx, types)| Call(idx, types)),
             (any::<PropIndex>(), any::<PropIndex>(),).prop_map(|(idx, types)| Pack(idx, types)),
             (any::<PropIndex>(), any::<PropIndex>(),).prop_map(|(idx, types)| Unpack(idx, types)),
@@ -234,7 +246,8 @@ impl BytecodeGen {
             any::<PropIndex>().prop_map(CopyLoc),
             any::<PropIndex>().prop_map(MoveLoc),
             any::<PropIndex>().prop_map(StLoc),
-            any::<PropIndex>().prop_map(BorrowLoc),
+            any::<PropIndex>().prop_map(MutBorrowLoc),
+            any::<PropIndex>().prop_map(ImmBorrowLoc),
         ]
     }
 
@@ -248,8 +261,10 @@ impl BytecodeGen {
         use BytecodeGen::*;
 
         match self {
-            BorrowField(_) => state.field_defs_len != 0,
-            CopyLoc(_) | MoveLoc(_) | StLoc(_) | BorrowLoc(_) => !locals_signature.is_empty(),
+            MutBorrowField(_) | ImmBorrowField(_) => state.field_defs_len != 0,
+            CopyLoc(_) | MoveLoc(_) | StLoc(_) | MutBorrowLoc(_) | ImmBorrowLoc(_) => {
+                !locals_signature.is_empty()
+            }
             _ => true,
         }
     }
@@ -277,14 +292,23 @@ impl BytecodeGen {
             BytecodeGen::LdByteArray(idx) => Bytecode::LdByteArray(ByteArrayPoolIndex::new(
                 idx.index(state.byte_array_pool_len) as TableIndex,
             )),
-            BytecodeGen::BorrowField(idx) => {
+            BytecodeGen::MutBorrowField(idx) => {
                 // Again, once meaningful bytecodes are generated this won't actually be a
                 // possibility since it would be impossible to load a field from a struct that
                 // doesn't have any.
                 if state.field_defs_len == 0 {
                     return None;
                 }
-                Bytecode::BorrowField(FieldDefinitionIndex::new(
+                Bytecode::MutBorrowField(FieldDefinitionIndex::new(
+                    idx.index(state.field_defs_len) as TableIndex
+                ))
+            }
+            BytecodeGen::ImmBorrowField(idx) => {
+                // Same situation as above
+                if state.field_defs_len == 0 {
+                    return None;
+                }
+                Bytecode::ImmBorrowField(FieldDefinitionIndex::new(
                     idx.index(state.field_defs_len) as TableIndex
                 ))
             }
@@ -344,11 +368,17 @@ impl BytecodeGen {
                 }
                 Bytecode::StLoc(idx.index(locals_signature.len()) as LocalIndex)
             }
-            BytecodeGen::BorrowLoc(idx) => {
+            BytecodeGen::MutBorrowLoc(idx) => {
                 if locals_signature.is_empty() {
                     return None;
                 }
-                Bytecode::BorrowLoc(idx.index(locals_signature.len()) as LocalIndex)
+                Bytecode::MutBorrowLoc(idx.index(locals_signature.len()) as LocalIndex)
+            }
+            BytecodeGen::ImmBorrowLoc(idx) => {
+                if locals_signature.is_empty() {
+                    return None;
+                }
+                Bytecode::ImmBorrowLoc(idx.index(locals_signature.len()) as LocalIndex)
             }
         };
 
@@ -368,7 +398,6 @@ impl BytecodeGen {
 
         static JUST_BYTECODES: &[Bytecode] = &[
             FreezeRef,
-            ReleaseRef,
             Pop,
             Ret,
             LdTrue,
@@ -396,7 +425,6 @@ impl BytecodeGen {
             GetTxnMaxGasUnits,
             GetTxnSenderAddress,
             CreateAccount,
-            EmitEvent,
             GetTxnSequenceNumber,
             GetTxnPublicKey,
         ];

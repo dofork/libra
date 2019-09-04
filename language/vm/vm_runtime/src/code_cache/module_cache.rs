@@ -302,6 +302,12 @@ impl<'alloc> VMModuleCache<'alloc> {
                             fetcher
                         ));
                         if let Some(t) = ty {
+                            // `field_types` is initally empty, a single element is pushed
+                            // per loop iteration and the number of iterations is bound to
+                            // the max size of `module.field_def_range()`.
+                            // MIRAI cannot currently check this bound in terms of
+                            // `field_count`.
+                            assume!(field_types.len() < usize::max_value());
                             field_types.push(t);
                         } else {
                             return Ok(Ok(None));

@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use config::config::{VMConfig, VMPublishingOption};
+use crypto::ed25519::*;
 use failure::prelude::*;
 use ir_to_bytecode::{compiler::compile_program, parser::ast};
 use lazy_static::lazy_static;
-use nextgen_crypto::ed25519::*;
 use rand::{rngs::StdRng, SeedableRng};
 use state_view::StateView;
 use std::{collections::HashSet, iter::FromIterator, time::Duration};
@@ -36,7 +36,7 @@ use vm_runtime::{
         module_cache::{BlockModuleCache, VMModuleCache},
     },
     data_cache::BlockDataCache,
-    txn_executor::{TransactionExecutor, ACCOUNT_MODULE, COIN_MODULE},
+    txn_executor::{TransactionExecutor, ACCOUNT_MODULE, BLOCK_MODULE, COIN_MODULE},
 };
 use vm_runtime_types::value::Local;
 
@@ -56,6 +56,7 @@ pub fn sign_genesis_transaction(raw_txn: RawTransaction) -> Result<SignatureChec
 }
 
 #[derive(Debug)]
+#[cfg_attr(any(test, feature = "testing"), derive(Clone))]
 pub struct Account {
     pub addr: AccountAddress,
     pub privkey: Ed25519PrivateKey,
@@ -328,6 +329,10 @@ pub fn encode_genesis_transaction_with_validator(
             txn_executor.create_account(genesis_addr).unwrap().unwrap();
             txn_executor
                 .create_account(account_config::core_code_address())
+                .unwrap()
+                .unwrap();
+            txn_executor
+                .execute_function(&BLOCK_MODULE, "initialize", vec![])
                 .unwrap()
                 .unwrap();
             txn_executor

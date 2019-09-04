@@ -5,13 +5,14 @@
 mod mock_vm_test;
 
 use config::config::VMConfig;
-use nextgen_crypto::ed25519::compat;
+use crypto::ed25519::compat;
 use state_view::StateView;
 use std::collections::HashMap;
 use types::{
     access_path::AccessPath,
     account_address::{AccountAddress, ADDRESS_LENGTH},
     contract_event::ContractEvent,
+    event::EventKey,
     transaction::{
         Program, RawTransaction, SignedTransaction, TransactionArgument, TransactionOutput,
         TransactionPayload, TransactionStatus,
@@ -235,9 +236,11 @@ fn gen_payment_writeset(
 }
 
 fn gen_events(sender: AccountAddress) -> Vec<ContractEvent> {
-    let access_path = AccessPath::new(sender, b"event".to_vec());
-    let event = ContractEvent::new(access_path, 0, b"event_data".to_vec());
-    vec![event]
+    vec![ContractEvent::new(
+        EventKey::new_from_address(&sender, 0),
+        0,
+        b"event_data".to_vec(),
+    )]
 }
 
 pub fn encode_mint_program(amount: u64) -> Program {
@@ -305,6 +308,12 @@ fn decode_transaction(txn: &SignedTransaction) -> Transaction {
         }
         TransactionPayload::WriteSet(_) => {
             unimplemented!("MockVM does not support WriteSet transaction payload.")
+        }
+        TransactionPayload::Script(_) => {
+            unimplemented!("MockVM does not support Script transaction payload.")
+        }
+        TransactionPayload::Module(_) => {
+            unimplemented!("MockVM does not support Module transaction payload.")
         }
     }
 }

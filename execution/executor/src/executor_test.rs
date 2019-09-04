@@ -8,10 +8,9 @@ use crate::{
     Executor, OP_COUNTERS,
 };
 use config::config::{NodeConfig, NodeConfigHelpers};
-use crypto::{hash::GENESIS_BLOCK_ID, HashValue};
+use crypto::{ed25519::*, hash::GENESIS_BLOCK_ID, HashValue};
 use futures::executor::block_on;
 use grpcio::{EnvBuilder, ServerBuilder};
-use nextgen_crypto::ed25519::*;
 use proptest::prelude::*;
 use proto_conv::IntoProtoBytes;
 use rusty_fork::{rusty_fork_id, rusty_fork_test, rusty_fork_test_name};
@@ -373,6 +372,22 @@ fn test_executor_execute_chunk() {
     assert_eq!(li.ledger_info().consensus_block_id(), *GENESIS_BLOCK_ID);
 
     // Execute the second chunk. After that we should still get the genesis ledger info from DB.
+    block_on(executor.execute_chunk(chunks[1].clone(), ledger_info.clone()))
+        .unwrap()
+        .unwrap();
+    let (_, li, _) = storage_client.update_to_latest_ledger(0, vec![]).unwrap();
+    assert_eq!(li.ledger_info().version(), 0);
+    assert_eq!(li.ledger_info().consensus_block_id(), *GENESIS_BLOCK_ID);
+
+    // Execute an empty chunk. After that we should still get the genesis ledger info from DB.
+    block_on(executor.execute_chunk(TransactionListWithProof::new_empty(), ledger_info.clone()))
+        .unwrap()
+        .unwrap();
+    let (_, li, _) = storage_client.update_to_latest_ledger(0, vec![]).unwrap();
+    assert_eq!(li.ledger_info().version(), 0);
+    assert_eq!(li.ledger_info().consensus_block_id(), *GENESIS_BLOCK_ID);
+
+    // Execute the second chunk again. After that we should still get the same thing.
     block_on(executor.execute_chunk(chunks[1].clone(), ledger_info.clone()))
         .unwrap()
         .unwrap();

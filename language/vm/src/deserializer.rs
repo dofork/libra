@@ -380,6 +380,8 @@ fn build_script_tables(
         match table.kind {
             TableType::MAIN => {
                 let start: usize = table.offset as usize;
+                // `check_tables()` ensures that the table indices are in bounds
+                assume!(start <= usize::max_value() - (table.count as usize));
                 let end: usize = start + table.count as usize;
                 let mut cursor = Cursor::new(&binary[start..end]);
                 let main = load_function_def(&mut cursor)?;
@@ -443,12 +445,12 @@ fn load_struct_handles(
         let module_handle = read_uleb_u16_internal(&mut cursor)?;
         let name = read_uleb_u16_internal(&mut cursor)?;
         let is_nominal_resource = load_nominal_resource_flag(&mut cursor)?;
-        let type_parameters = load_kinds(&mut cursor)?;
+        let type_formals = load_kinds(&mut cursor)?;
         struct_handles.push(StructHandle {
             module: ModuleHandleIndex(module_handle),
             name: StringPoolIndex(name),
             is_nominal_resource,
-            type_parameters,
+            type_formals,
         });
     }
     Ok(())
@@ -610,11 +612,11 @@ fn load_function_signatures(
             let token = load_signature_token(&mut cursor)?;
             args_signature.push(token);
         }
-        let type_parameters = load_kinds(&mut cursor)?;
+        let type_formals = load_kinds(&mut cursor)?;
         function_signatures.push(FunctionSignature {
             return_types: returns_signature,
             arg_types: args_signature,
-            type_parameters,
+            type_formals,
         });
     }
     Ok(())
@@ -809,12 +811,26 @@ fn load_function_def(cursor: &mut Cursor<&[u8]>) -> BinaryLoaderResult<FunctionD
     let function = read_uleb_u16_internal(cursor)?;
 
     let flags = cursor.read_u8().map_err(|_| BinaryError::Malformed)?;
+    let acquires_global_resources = load_struct_definition_indices(cursor)?;
     let code_unit = load_code_unit(cursor)?;
     Ok(FunctionDefinition {
         function: FunctionHandleIndex(function),
         flags,
+        acquires_global_resources,
         code: code_unit,
     })
+}
+
+/// Deserializes a `Vec<StructDefinitionIndex>`.
+fn load_struct_definition_indices(
+    cursor: &mut Cursor<&[u8]>,
+) -> BinaryLoaderResult<Vec<StructDefinitionIndex>> {
+    let len = cursor.read_u8().map_err(|_| BinaryError::Malformed)?;
+    let mut indices = vec![];
+    for _ in 0..len {
+        indices.push(StructDefinitionIndex(read_uleb_u16_internal(cursor)?));
+    }
+    Ok(indices)
 }
 
 /// Deserializes a `CodeUnit`.
@@ -878,13 +894,21 @@ fn load_code(cursor: &mut Cursor<&[u8]>, code: &mut Vec<Bytecode>) -> BinaryLoad
                 let idx = cursor.read_u8().map_err(|_| BinaryError::Malformed)?;
                 Bytecode::StLoc(idx)
             }
-            Opcodes::BORROW_LOC => {
+            Opcodes::MUT_BORROW_LOC => {
                 let idx = cursor.read_u8().map_err(|_| BinaryError::Malformed)?;
-                Bytecode::BorrowLoc(idx)
+                Bytecode::MutBorrowLoc(idx)
             }
-            Opcodes::BORROW_FIELD => {
+            Opcodes::IMM_BORROW_LOC => {
+                let idx = cursor.read_u8().map_err(|_| BinaryError::Malformed)?;
+                Bytecode::ImmBorrowLoc(idx)
+            }
+            Opcodes::MUT_BORROW_FIELD => {
                 let idx = read_uleb_u16_internal(cursor)?;
-                Bytecode::BorrowField(FieldDefinitionIndex(idx))
+                Bytecode::MutBorrowField(FieldDefinitionIndex(idx))
+            }
+            Opcodes::IMM_BORROW_FIELD => {
+                let idx = read_uleb_u16_internal(cursor)?;
+                Bytecode::ImmBorrowField(FieldDefinitionIndex(idx))
             }
             Opcodes::LD_BYTEARRAY => {
                 let idx = read_uleb_u16_internal(cursor)?;
@@ -939,7 +963,6 @@ fn load_code(cursor: &mut Cursor<&[u8]>, code: &mut Vec<Bytecode>) -> BinaryLoad
                 let types_idx = read_uleb_u16_internal(cursor)?;
                 Bytecode::BorrowGlobal(StructDefinitionIndex(idx), LocalsSignatureIndex(types_idx))
             }
-            Opcodes::RELEASE_REF => Bytecode::ReleaseRef,
             Opcodes::MOVE_FROM => {
                 let idx = read_uleb_u16_internal(cursor)?;
                 let types_idx = read_uleb_u16_internal(cursor)?;
@@ -951,7 +974,6 @@ fn load_code(cursor: &mut Cursor<&[u8]>, code: &mut Vec<Bytecode>) -> BinaryLoad
                 Bytecode::MoveToSender(StructDefinitionIndex(idx), LocalsSignatureIndex(types_idx))
             }
             Opcodes::CREATE_ACCOUNT => Bytecode::CreateAccount,
-            Opcodes::EMIT_EVENT => Bytecode::EmitEvent,
             Opcodes::GET_TXN_SEQUENCE_NUMBER => Bytecode::GetTxnSequenceNumber,
             Opcodes::GET_TXN_PUBLIC_KEY => Bytecode::GetTxnPublicKey,
             Opcodes::FREEZE_REF => Bytecode::FreezeRef,
@@ -1088,43 +1110,43 @@ impl Opcodes {
             0x0B => Ok(Opcodes::COPY_LOC),
             0x0C => Ok(Opcodes::MOVE_LOC),
             0x0D => Ok(Opcodes::ST_LOC),
-            0x0E => Ok(Opcodes::BORROW_LOC),
-            0x0F => Ok(Opcodes::BORROW_FIELD),
-            0x10 => Ok(Opcodes::LD_BYTEARRAY),
-            0x11 => Ok(Opcodes::CALL),
-            0x12 => Ok(Opcodes::PACK),
-            0x13 => Ok(Opcodes::UNPACK),
-            0x14 => Ok(Opcodes::READ_REF),
-            0x15 => Ok(Opcodes::WRITE_REF),
-            0x16 => Ok(Opcodes::ADD),
-            0x17 => Ok(Opcodes::SUB),
-            0x18 => Ok(Opcodes::MUL),
-            0x19 => Ok(Opcodes::MOD),
-            0x1A => Ok(Opcodes::DIV),
-            0x1B => Ok(Opcodes::BIT_OR),
-            0x1C => Ok(Opcodes::BIT_AND),
-            0x1D => Ok(Opcodes::XOR),
-            0x1E => Ok(Opcodes::OR),
-            0x1F => Ok(Opcodes::AND),
-            0x20 => Ok(Opcodes::NOT),
-            0x21 => Ok(Opcodes::EQ),
-            0x22 => Ok(Opcodes::NEQ),
-            0x23 => Ok(Opcodes::LT),
-            0x24 => Ok(Opcodes::GT),
-            0x25 => Ok(Opcodes::LE),
-            0x26 => Ok(Opcodes::GE),
-            0x27 => Ok(Opcodes::ABORT),
-            0x28 => Ok(Opcodes::GET_TXN_GAS_UNIT_PRICE),
-            0x29 => Ok(Opcodes::GET_TXN_MAX_GAS_UNITS),
-            0x2A => Ok(Opcodes::GET_GAS_REMAINING),
-            0x2B => Ok(Opcodes::GET_TXN_SENDER),
-            0x2C => Ok(Opcodes::EXISTS),
-            0x2D => Ok(Opcodes::BORROW_GLOBAL),
-            0x2E => Ok(Opcodes::RELEASE_REF),
-            0x2F => Ok(Opcodes::MOVE_FROM),
-            0x30 => Ok(Opcodes::MOVE_TO),
-            0x31 => Ok(Opcodes::CREATE_ACCOUNT),
-            0x32 => Ok(Opcodes::EMIT_EVENT),
+            0x0E => Ok(Opcodes::MUT_BORROW_LOC),
+            0x0F => Ok(Opcodes::IMM_BORROW_LOC),
+            0x10 => Ok(Opcodes::MUT_BORROW_FIELD),
+            0x11 => Ok(Opcodes::IMM_BORROW_FIELD),
+            0x12 => Ok(Opcodes::LD_BYTEARRAY),
+            0x13 => Ok(Opcodes::CALL),
+            0x14 => Ok(Opcodes::PACK),
+            0x15 => Ok(Opcodes::UNPACK),
+            0x16 => Ok(Opcodes::READ_REF),
+            0x17 => Ok(Opcodes::WRITE_REF),
+            0x18 => Ok(Opcodes::ADD),
+            0x19 => Ok(Opcodes::SUB),
+            0x1A => Ok(Opcodes::MUL),
+            0x1B => Ok(Opcodes::MOD),
+            0x1C => Ok(Opcodes::DIV),
+            0x1D => Ok(Opcodes::BIT_OR),
+            0x1E => Ok(Opcodes::BIT_AND),
+            0x1F => Ok(Opcodes::XOR),
+            0x20 => Ok(Opcodes::OR),
+            0x21 => Ok(Opcodes::AND),
+            0x22 => Ok(Opcodes::NOT),
+            0x23 => Ok(Opcodes::EQ),
+            0x24 => Ok(Opcodes::NEQ),
+            0x25 => Ok(Opcodes::LT),
+            0x26 => Ok(Opcodes::GT),
+            0x27 => Ok(Opcodes::LE),
+            0x28 => Ok(Opcodes::GE),
+            0x29 => Ok(Opcodes::ABORT),
+            0x2A => Ok(Opcodes::GET_TXN_GAS_UNIT_PRICE),
+            0x2B => Ok(Opcodes::GET_TXN_MAX_GAS_UNITS),
+            0x2C => Ok(Opcodes::GET_GAS_REMAINING),
+            0x2D => Ok(Opcodes::GET_TXN_SENDER),
+            0x2E => Ok(Opcodes::EXISTS),
+            0x2F => Ok(Opcodes::BORROW_GLOBAL),
+            0x30 => Ok(Opcodes::MOVE_FROM),
+            0x31 => Ok(Opcodes::MOVE_TO),
+            0x32 => Ok(Opcodes::CREATE_ACCOUNT),
             0x33 => Ok(Opcodes::GET_TXN_SEQUENCE_NUMBER),
             0x34 => Ok(Opcodes::GET_TXN_PUBLIC_KEY),
             0x35 => Ok(Opcodes::FREEZE_REF),

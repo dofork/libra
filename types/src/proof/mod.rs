@@ -1,17 +1,14 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod definition;
 pub mod position;
 #[cfg(any(test, feature = "testing"))]
 pub mod proptest_proof;
-pub mod treebits;
 
+mod definition;
 #[cfg(test)]
 #[path = "unit_tests/proof_test.rs"]
 mod proof_test;
-#[cfg(test)]
-mod unit_tests;
 
 use crate::{
     account_state_blob::AccountStateBlob,
@@ -31,7 +28,8 @@ use failure::prelude::*;
 use std::{collections::VecDeque, marker::PhantomData};
 
 pub use crate::proof::definition::{
-    AccountStateProof, AccumulatorProof, EventProof, SignedTransactionProof, SparseMerkleProof,
+    AccountStateProof, AccumulatorConsistencyProof, AccumulatorProof, EventProof,
+    SignedTransactionProof, SparseMerkleProof,
 };
 
 /// Verifies that a `SignedTransaction` with hash value of `signed_transaction_hash`

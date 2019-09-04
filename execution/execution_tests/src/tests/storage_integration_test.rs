@@ -3,15 +3,14 @@
 
 use crate::{create_and_start_server, gen_block_id, gen_ledger_info_with_sigs};
 use config_builder::util::get_test_config;
-use crypto::hash::GENESIS_BLOCK_ID;
+use crypto::{ed25519::*, hash::GENESIS_BLOCK_ID, test_utils::TEST_SEED};
 use execution_client::ExecutionClient;
 use execution_proto::ExecuteBlockRequest;
 use failure::prelude::*;
 use grpcio::EnvBuilder;
-use nextgen_crypto::{ed25519::*, test_utils::TEST_SEED};
 use proto_conv::FromProto;
 use rand::SeedableRng;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use storage_client::{StorageRead, StorageReadServiceClient};
 use types::{
     access_path::AccessPath,
@@ -241,7 +240,7 @@ fn test_execution_with_storage() {
         .update_to_latest_ledger(/* client_known_version = */ 0, request_items.clone())
         .unwrap();
     verify_update_to_latest_ledger_response(
-        Arc::new(ValidatorVerifier::new_empty()),
+        Arc::new(ValidatorVerifier::new(HashMap::new())),
         0,
         &request_items,
         &response_items,
@@ -434,7 +433,7 @@ fn test_execution_with_storage() {
         .update_to_latest_ledger(/* client_known_version = */ 0, request_items.clone())
         .unwrap();
     verify_update_to_latest_ledger_response(
-        Arc::new(ValidatorVerifier::new_empty()),
+        Arc::new(ValidatorVerifier::new(HashMap::new())),
         0,
         &request_items,
         &response_items,

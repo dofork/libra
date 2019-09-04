@@ -120,6 +120,8 @@ impl ModuleBuilder {
             .map(|(i, sig)| FunctionDefinition {
                 function: FunctionHandleIndex::new(i as u16),
                 flags: CodeUnit::PUBLIC,
+                // TODO this needs to be generated
+                acquires_global_resources: vec![],
                 code: CodeUnit {
                     max_stack_size: 20,
                     locals: LocalsSignatureIndex(i as u16),
@@ -216,7 +218,7 @@ impl ModuleBuilder {
                 module: ModuleHandleIndex::new(0),
                 name: StringPoolIndex::new((struct_idx + offset) as TableIndex),
                 is_nominal_resource: self.gen.gen_bool(1.0 / 2.0),
-                type_parameters: vec![],
+                type_formals: vec![],
             })
             .collect();
     }
@@ -262,7 +264,7 @@ impl ModuleBuilder {
                 let function_sig = FunctionSignature {
                     arg_types: args,
                     return_types,
-                    type_parameters: vec![],
+                    type_formals: vec![],
                 };
 
                 (locals, function_sig)
@@ -335,7 +337,7 @@ impl ModuleBuilder {
         let (mut names, mut addresses) = self
             .known_modules
             .keys()
-            .map(|key| (key.name().clone(), key.address()))
+            .map(|key| (key.name().to_string(), key.address()))
             .unzip();
 
         let address_pool_offset = self.module.address_pool.len() as TableIndex;

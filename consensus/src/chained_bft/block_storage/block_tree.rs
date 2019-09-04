@@ -4,7 +4,7 @@
 use crate::{
     chained_bft::{
         block_storage::{BlockTreeError, VoteReceptionResult},
-        consensus_types::{block::Block, quorum_cert::QuorumCert},
+        consensus_types::{block::Block, quorum_cert::QuorumCert, vote_data::VoteData},
         safety::vote_msg::VoteMsg,
     },
     counters,
@@ -12,10 +12,9 @@ use crate::{
     util::time_service::duration_since_epoch,
 };
 use canonical_serialization::CanonicalSerialize;
-use crypto::HashValue;
+use crypto::{hash::CryptoHash, HashValue};
 use logger::prelude::*;
 use mirai_annotations::checked_verify_eq;
-use nextgen_crypto::ed25519::*;
 use serde::Serialize;
 use std::{
     collections::{
@@ -27,7 +26,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use types::ledger_info::LedgerInfoWithSignatures;
+use types::crypto_proxies::LedgerInfoWithSignatures;
 
 /// This structure maintains a consistent block tree of parent and children links. Blocks contain
 /// parent links and are immutable.  For all parent links, a child link exists. This structure
@@ -58,11 +57,12 @@ pub struct BlockTree<T> {
 
     /// `id_to_votes` might keep multiple LedgerInfos per proposed block in order
     /// to tolerate non-determinism in execution: given a proposal, a QuorumCertificate is going
-    /// to be collected only for all the votes that have identical state id.
-    /// The vote digest is a hash that covers both the proposal id and the state id.
+    /// to be collected only for all the votes that carry identical LedgerInfo.
+    /// LedgerInfo digest covers the potential commit ids, as well as the vote information
+    /// (including the 3-chain of a voted proposal).
     /// Thus, the structure of `id_to_votes` is as follows:
-    /// HashMap<proposed_block_id, HashMap<vote_digest, LedgerInfoWithSignatures>>
-    id_to_votes: HashMap<HashValue, HashMap<HashValue, LedgerInfoWithSignatures<Ed25519Signature>>>,
+    /// HashMap<proposed_block_id, HashMap<ledger_info_digest, LedgerInfoWithSignatures>>
+    id_to_votes: HashMap<HashValue, HashMap<HashValue, LedgerInfoWithSignatures>>,
     /// Map of block id to its completed quorum certificate (2f + 1 votes)
     id_to_quorum_cert: HashMap<HashValue, Arc<QuorumCert>>,
     /// To keep the IDs of the elements that have been pruned from the tree but not cleaned up yet.
@@ -172,25 +172,6 @@ where
         self.id_to_quorum_cert.get(&block_id).cloned()
     }
 
-    pub(super) fn is_ancestor(
-        &self,
-        ancestor: &Block<T>,
-        block: &Block<T>,
-    ) -> Result<bool, BlockTreeError> {
-        let mut current_block = block;
-        while current_block.round() >= ancestor.round() {
-            let parent_id = current_block.parent_id();
-            current_block = self
-                .id_to_block
-                .get(&parent_id)
-                .ok_or(BlockTreeError::BlockNotFound { id: parent_id })?;
-            if current_block.id() == ancestor.id() {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     pub(super) fn insert_block(
         &mut self,
         block: Block<T>,
@@ -272,7 +253,7 @@ where
         vote_msg: &VoteMsg,
         min_votes_for_qc: usize,
     ) -> VoteReceptionResult {
-        let block_id = vote_msg.proposed_block_id();
+        let block_id = vote_msg.block_id();
         if let Some(old_qc) = self.id_to_quorum_cert.get(&block_id) {
             return VoteReceptionResult::OldQuorumCertificate(Arc::clone(old_qc));
         }
@@ -283,10 +264,9 @@ where
             .entry(block_id)
             .or_insert_with(HashMap::new);
 
-        // Note that the digest covers not just the proposal id, but also the resulting
-        // state id as well as the round number. In other words, if two different voters have the
-        // same digest then they reached the same state following the same proposals.
-        let digest = vote_msg.vote_hash();
+        // Note that the digest covers the ledger info information, which is also indirectly
+        // covering vote data hash (in its `consensus_data_hash` field).
+        let digest = vote_msg.ledger_info().hash();
         let li_with_sig = block_votes.entry(digest).or_insert_with(|| {
             LedgerInfoWithSignatures::new(vote_msg.ledger_info().clone(), HashMap::new())
         });
@@ -294,19 +274,21 @@ where
         if li_with_sig.signatures().contains_key(&author) {
             return VoteReceptionResult::DuplicateVote;
         }
-        li_with_sig.add_signature(author, vote_msg.signature().clone());
+        vote_msg.signature().clone().add_to_li(author, li_with_sig);
 
         let num_votes = li_with_sig.signatures().len();
         if num_votes >= min_votes_for_qc {
             let quorum_cert = QuorumCert::new(
-                block_id,
-                vote_msg.executed_state(),
-                vote_msg.round(),
+                VoteData::new(
+                    block_id,
+                    vote_msg.executed_state(),
+                    vote_msg.block_round(),
+                    vote_msg.parent_block_id(),
+                    vote_msg.parent_block_round(),
+                    vote_msg.grandparent_block_id(),
+                    vote_msg.grandparent_block_round(),
+                ),
                 li_with_sig.clone(),
-                vote_msg.parent_block_id(),
-                vote_msg.parent_block_round(),
-                vote_msg.grandparent_block_id(),
-                vote_msg.grandparent_block_round(),
             );
             // Note that the block might not be present locally, in which case we cannot calculate
             // time between block creation and qc
@@ -314,7 +296,7 @@ where
                 if let Some(time_to_qc) = duration_since_epoch()
                     .checked_sub(Duration::from_micros(block.timestamp_usecs()))
                 {
-                    counters::CREATION_TO_QC_MS.observe(time_to_qc.as_millis() as f64);
+                    counters::CREATION_TO_QC_S.observe_duration(time_to_qc);
                 }
             }
             return VoteReceptionResult::NewQuorumCertificate(Arc::new(quorum_cert));
@@ -424,14 +406,6 @@ where
 
     pub(super) fn get_all_block_id(&self) -> Vec<HashValue> {
         self.id_to_block.keys().cloned().collect()
-    }
-
-    #[allow(dead_code)]
-    fn print_all_blocks(&self) {
-        println!("Printing all {} blocks", self.id_to_block.len());
-        for block in self.id_to_block.values() {
-            println!("{:?}", block);
-        }
     }
 }
 

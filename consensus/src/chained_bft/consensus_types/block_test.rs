@@ -11,7 +11,6 @@ use crate::chained_bft::{
 };
 
 use crypto::HashValue;
-use nextgen_crypto::ed25519::{Ed25519PrivateKey, Ed25519PublicKey};
 use proptest::{prelude::*, std_facade::hash_map::HashMap};
 use std::{
     panic,
@@ -19,8 +18,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 #[cfg(test)]
+use types::crypto_proxies::SecretKey;
+use types::crypto_proxies::{ValidatorSigner, ValidatorVerifier};
+#[cfg(test)]
 use types::validator_signer::proptests;
-use types::{validator_signer::ValidatorSigner, validator_verifier::ValidatorVerifier};
 
 type LinearizedBlockForest<T> = Vec<Block<T>>;
 
@@ -34,7 +35,7 @@ prop_compose! {
         parent_id_strategy: impl Strategy<Value = HashValue>,
         round_strategy: impl Strategy<Value = Round>,
         height: Height,
-        signer_strategy: impl Strategy<Value = ValidatorSigner<Ed25519PrivateKey>>,
+        signer_strategy: impl Strategy<Value = ValidatorSigner>,
     )(
         parent_id in parent_id_strategy,
         round in round_strategy,
@@ -126,7 +127,7 @@ prop_compose! {
     /// of the parent. This, depending on branching, does not require the
     /// QC to always be an ancestor or the parent to always be the highest QC
     fn child(
-        signer_strategy: impl Strategy<Value = ValidatorSigner<Ed25519PrivateKey>>,
+        signer_strategy: impl Strategy<Value = ValidatorSigner>,
         block_forest_strategy: impl Strategy<Value = LinearizedBlockForest<Vec<usize>>>,
     )(
         signer in signer_strategy,
@@ -160,7 +161,7 @@ prop_compose! {
 /// vector
 fn block_forest_from_keys(
     depth: u32,
-    keypairs: Vec<Ed25519PrivateKey>,
+    keypairs: Vec<SecretKey>,
 ) -> impl Strategy<Value = LinearizedBlockForest<Vec<usize>>> {
     let leaf = leaf_strategy().prop_map(|block| vec![block]);
     // Note that having `expected_branch_size` of 1 seems to generate significantly larger trees
@@ -175,7 +176,7 @@ fn block_forest_from_keys(
 pub fn block_forest_and_its_keys(
     quorum_size: usize,
     depth: u32,
-) -> impl Strategy<Value = (Vec<Ed25519PrivateKey>, LinearizedBlockForest<Vec<usize>>)> {
+) -> impl Strategy<Value = (Vec<SecretKey>, LinearizedBlockForest<Vec<usize>>)> {
     proptest::collection::vec(proptests::arb_signing_key(), quorum_size).prop_flat_map(
         move |private_key| {
             (
@@ -207,11 +208,14 @@ fn test_nil_block() {
         genesis_block.id()
     );
     assert_eq!(nil_block.round(), 1);
-    assert_eq!(nil_block.timestamp_usecs(), genesis_block.timestamp_usecs());
+    assert_eq!(
+        nil_block.timestamp_usecs(),
+        genesis_block.timestamp_usecs() + 1
+    );
     assert_eq!(nil_block.is_nil_block(), true);
     assert!(nil_block.author().is_none());
 
-    let dummy_verifier = Arc::new(ValidatorVerifier::<Ed25519PublicKey>::new(HashMap::new()));
+    let dummy_verifier = Arc::new(ValidatorVerifier::new(HashMap::new()));
     assert!(nil_block.verify(dummy_verifier.as_ref()).is_ok());
 
     let signer = ValidatorSigner::random(None);
@@ -222,8 +226,8 @@ fn test_nil_block() {
         nil_block.round(),
         nil_block.quorum_cert().certified_block_id(),
         nil_block.quorum_cert().certified_block_round(),
-        nil_block.quorum_cert().certified_parent_block_id(),
-        nil_block.quorum_cert().certified_parent_block_round(),
+        nil_block.quorum_cert().parent_block_id(),
+        nil_block.quorum_cert().parent_block_round(),
     );
     let nil_block_child = Block::make_block(
         &nil_block,
@@ -289,8 +293,8 @@ fn test_block_qc() {
         a1.round(),
         a1.quorum_cert().certified_block_id(),
         a1.quorum_cert().certified_block_round(),
-        a1.quorum_cert().certified_parent_block_id(),
-        a1.quorum_cert().certified_parent_block_round(),
+        a1.quorum_cert().parent_block_id(),
+        a1.quorum_cert().parent_block_round(),
     );
 
     let result = panic::catch_unwind(|| {

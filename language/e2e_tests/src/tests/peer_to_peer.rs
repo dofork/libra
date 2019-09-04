@@ -2,14 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    account::{Account, AccountData, AccountResource},
+    account::{Account, AccountData},
     common_transactions::peer_to_peer_txn,
     executor::FakeExecutor,
 };
-use canonical_serialization::SimpleDeserializer;
 use std::time::Instant;
 use types::{
-    account_config::{account_received_event_path, account_sent_event_path, AccountEvent},
+    account_config::AccountEvent,
     transaction::{SignedTransaction, TransactionOutput, TransactionStatus},
     vm_error::{ExecutionStatus, VMStatus},
 };
@@ -37,13 +36,7 @@ fn single_peer_to_peer_with_event() {
         output[0].status(),
         &TransactionStatus::Keep(VMStatus::Execution(ExecutionStatus::Executed))
     );
-    let rec_ev_path = account_sent_event_path();
-    let sent_ev_path = account_received_event_path();
-    for event in txn_output.events() {
-        assert!(
-            rec_ev_path == event.access_path().path || sent_ev_path == event.access_path().path
-        );
-    }
+
     executor.apply_write_set(txn_output.write_set());
 
     // check that numbers in stored DB are correct
@@ -56,28 +49,22 @@ fn single_peer_to_peer_with_event() {
     let updated_receiver = executor
         .read_account_resource(receiver.account())
         .expect("receiver must exist");
-    assert_eq!(
-        receiver_balance,
-        AccountResource::read_balance(&updated_receiver)
-    );
-    assert_eq!(
-        sender_balance,
-        AccountResource::read_balance(&updated_sender)
-    );
-    assert_eq!(11, AccountResource::read_sequence_number(&updated_sender));
-    assert_eq!(
-        0,
-        AccountResource::read_received_events_count(&updated_sender)
-    );
-    assert_eq!(1, AccountResource::read_sent_events_count(&updated_sender));
-    assert_eq!(
-        1,
-        AccountResource::read_received_events_count(&updated_receiver)
-    );
-    assert_eq!(
-        0,
-        AccountResource::read_sent_events_count(&updated_receiver)
-    );
+    assert_eq!(receiver_balance, updated_receiver.balance());
+    assert_eq!(sender_balance, updated_sender.balance());
+    assert_eq!(11, updated_sender.sequence_number());
+    assert_eq!(0, updated_sender.received_events().count(),);
+    assert_eq!(1, updated_sender.sent_events().count());
+    assert_eq!(1, updated_receiver.received_events().count());
+    assert_eq!(0, updated_receiver.sent_events().count());
+
+    let rec_ev_path = receiver.received_events_key().to_vec();
+    let sent_ev_path = sender.sent_events_key().to_vec();
+    for event in txn_output.events() {
+        assert!(
+            rec_ev_path.as_slice() == event.key().as_bytes()
+                || sent_ev_path.as_slice() == event.key().as_bytes()
+        );
+    }
 }
 
 #[test]
@@ -110,7 +97,7 @@ fn few_peer_to_peer_with_event() {
         // check events
         for event in txn_output.events() {
             let account_event: AccountEvent =
-                SimpleDeserializer::deserialize(event.event_data()).expect("event data must parse");
+                AccountEvent::try_from(event.event_data()).expect("event data must parse");
             assert_eq!(transfer_amount, account_event.amount());
             assert!(
                 &account_event.account() == sender.address()
@@ -128,43 +115,21 @@ fn few_peer_to_peer_with_event() {
 
         // check that numbers in stored DB are correct
         let gas = txn_output.gas_used();
-        let sender_balance =
-            AccountResource::read_balance(&original_sender) - transfer_amount - gas;
-        let receiver_balance = AccountResource::read_balance(&original_receiver) + transfer_amount;
+        let sender_balance = original_sender.balance() - transfer_amount - gas;
+        let receiver_balance = original_receiver.balance() + transfer_amount;
         let updated_sender = executor
             .read_account_resource(sender.account())
             .expect("sender must exist");
         let updated_receiver = executor
             .read_account_resource(receiver.account())
             .expect("receiver must exist");
-        assert_eq!(
-            receiver_balance,
-            AccountResource::read_balance(&updated_receiver)
-        );
-        assert_eq!(
-            sender_balance,
-            AccountResource::read_balance(&updated_sender)
-        );
-        assert_eq!(
-            11 + idx as u64,
-            AccountResource::read_sequence_number(&updated_sender)
-        );
-        assert_eq!(
-            0,
-            AccountResource::read_received_events_count(&updated_sender)
-        );
-        assert_eq!(
-            idx as u64 + 1,
-            AccountResource::read_sent_events_count(&updated_sender)
-        );
-        assert_eq!(
-            idx as u64 + 1,
-            AccountResource::read_received_events_count(&updated_receiver)
-        );
-        assert_eq!(
-            0,
-            AccountResource::read_sent_events_count(&updated_receiver)
-        );
+        assert_eq!(receiver_balance, updated_receiver.balance());
+        assert_eq!(sender_balance, updated_sender.balance());
+        assert_eq!(11 + idx as u64, updated_sender.sequence_number());
+        assert_eq!(0, updated_sender.received_events().count());
+        assert_eq!(idx as u64 + 1, updated_sender.sent_events().count());
+        assert_eq!(idx as u64 + 1, updated_receiver.received_events().count());
+        assert_eq!(0, updated_receiver.sent_events().count());
     }
 }
 
@@ -228,15 +193,9 @@ fn peer_to_peer_create_account() {
     let updated_receiver = executor
         .read_account_resource(&new_account)
         .expect("receiver must exist");
-    assert_eq!(
-        receiver_balance,
-        AccountResource::read_balance(&updated_receiver)
-    );
-    assert_eq!(
-        sender_balance,
-        AccountResource::read_balance(&updated_sender)
-    );
-    assert_eq!(11, AccountResource::read_sequence_number(&updated_sender));
+    assert_eq!(receiver_balance, updated_receiver.balance());
+    assert_eq!(sender_balance, updated_sender.balance());
+    assert_eq!(11, updated_sender.sequence_number());
 }
 
 // Holder for transaction data; arguments to transactions.
@@ -272,7 +231,7 @@ fn create_cyclic_transfers(
         let sender_resource = executor
             .read_account_resource(&sender)
             .expect("sender must exist");
-        let seq_num = AccountResource::read_sequence_number(&sender_resource);
+        let seq_num = sender_resource.sequence_number();
         let receiver = &accounts[(i + 1) % count];
 
         let txn = peer_to_peer_txn(sender, receiver, seq_num, transfer_amount);
@@ -296,7 +255,7 @@ fn create_one_to_many_transfers(
     let sender_resource = executor
         .read_account_resource(&sender)
         .expect("sender must exist");
-    let seq_num = AccountResource::read_sequence_number(&sender_resource);
+    let seq_num = sender_resource.sequence_number();
     // loop through all transactions and let each transfer the same amount to the next one
     let count = accounts.len();
     for (i, receiver) in accounts.iter().enumerate().take(count).skip(1) {
@@ -327,7 +286,7 @@ fn create_many_to_one_transfers(
         let sender_resource = executor
             .read_account_resource(sender)
             .expect("sender must exist");
-        let seq_num = AccountResource::read_sequence_number(&sender_resource);
+        let seq_num = sender_resource.sequence_number();
 
         let txn = peer_to_peer_txn(sender, receiver, seq_num, transfer_amount);
         txns.push(txn);
@@ -355,12 +314,12 @@ fn check_and_apply_transfer_output(
         let sender_resource = executor
             .read_account_resource(&sender)
             .expect("sender must exist");
-        let sender_initial_balance = AccountResource::read_balance(&sender_resource);
-        let sender_seq_num = AccountResource::read_sequence_number(&sender_resource);
+        let sender_initial_balance = sender_resource.balance();
+        let sender_seq_num = sender_resource.sequence_number();
         let receiver_resource = executor
             .read_account_resource(&receiver)
             .expect("receiver must exist");
-        let receiver_initial_balance = AccountResource::read_balance(&receiver_resource);
+        let receiver_initial_balance = receiver_resource.balance();
 
         // apply single transaction to DB
         let txn_output = &output[i];
@@ -376,18 +335,9 @@ fn check_and_apply_transfer_output(
         let updated_receiver = executor
             .read_account_resource(&receiver)
             .expect("receiver must exist");
-        assert_eq!(
-            receiver_balance,
-            AccountResource::read_balance(&updated_receiver)
-        );
-        assert_eq!(
-            sender_balance,
-            AccountResource::read_balance(&updated_sender)
-        );
-        assert_eq!(
-            sender_seq_num + 1,
-            AccountResource::read_sequence_number(&updated_sender)
-        );
+        assert_eq!(receiver_balance, updated_receiver.balance());
+        assert_eq!(sender_balance, updated_sender.balance());
+        assert_eq!(sender_seq_num + 1, updated_sender.sequence_number());
     }
 }
 
@@ -486,9 +436,9 @@ fn one_to_many_peer_to_peer() {
     // create a FakeExecutor with a genesis from file
     let mut executor = FakeExecutor::from_genesis_file();
 
-    // create and publish accounts with 2_000_000 coins
+    // create and publish accounts with 4_000_000 coins
     let account_size = 100usize;
-    let initial_balance = 2_000_000u64;
+    let initial_balance = 4_000_000u64;
     let initial_seq_num = 10u64;
     let accounts = executor.create_accounts(account_size, initial_balance, initial_seq_num);
 

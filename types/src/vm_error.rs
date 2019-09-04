@@ -110,6 +110,10 @@ pub enum VMVerificationError {
     MoveToSenderNoResourceError(String),
     CreateAccountTypeMismatchError(String),
     GlobalReferenceError(String),
+    MissingAcquiresResourceAnnotationError(String),
+    ExtraneousAcquiresResourceAnnotationError(String),
+    DuplicateAcquiresResourceAnnotationError(String),
+    InvalidAcquiresResourceAnnotationError(String),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
@@ -137,6 +141,7 @@ pub enum VMInvariantViolationError {
     LocalReferenceError,
     StorageError,
     InternalTypeError,
+    EventKeyMismatch,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -192,6 +197,8 @@ pub enum ExecutionStatus {
     ArithmeticError(ArithmeticErrorType),
     DynamicReferenceError(DynamicReferenceErrorType),
     DuplicateModuleName,
+    ExecutionStackOverflow,
+    CallStackOverflow,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
@@ -571,6 +578,19 @@ impl IntoProto for VMVerificationError {
             VMVerificationError::GlobalReferenceError(message) => {
                 (ProtoKind::GlobalReferenceError, message)
             }
+            VMVerificationError::MissingAcquiresResourceAnnotationError(message) => {
+                (ProtoKind::MissingAcquiresResourceAnnotationError, message)
+            }
+            VMVerificationError::ExtraneousAcquiresResourceAnnotationError(message) => (
+                ProtoKind::ExtraneousAcquiresResourceAnnotationError,
+                message,
+            ),
+            VMVerificationError::InvalidAcquiresResourceAnnotationError(message) => {
+                (ProtoKind::InvalidAcquiresResourceAnnotationError, message)
+            }
+            VMVerificationError::DuplicateAcquiresResourceAnnotationError(message) => {
+                (ProtoKind::DuplicateAcquiresResourceAnnotationError, message)
+            }
         }
     }
 }
@@ -757,6 +777,18 @@ impl FromProto for VMVerificationError {
             ProtoKind::GlobalReferenceError => {
                 Ok(VMVerificationError::GlobalReferenceError(message))
             }
+            ProtoKind::MissingAcquiresResourceAnnotationError => Ok(
+                VMVerificationError::MissingAcquiresResourceAnnotationError(message),
+            ),
+            ProtoKind::ExtraneousAcquiresResourceAnnotationError => {
+                Ok(VMVerificationError::ExtraneousAcquiresResourceAnnotationError(message))
+            }
+            ProtoKind::DuplicateAcquiresResourceAnnotationError => {
+                Ok(VMVerificationError::DuplicateAcquiresResourceAnnotationError(message))
+            }
+            ProtoKind::InvalidAcquiresResourceAnnotationError => Ok(
+                VMVerificationError::InvalidAcquiresResourceAnnotationError(message),
+            ),
             ProtoKind::UnknownVerificationError => {
                 bail_err!(DecodingError::UnknownVerificationErrorEncountered)
             }
@@ -837,6 +869,7 @@ impl IntoProto for VMInvariantViolationError {
             VMInvariantViolationError::LocalReferenceError => ProtoStatus::LocalReferenceError,
             VMInvariantViolationError::StorageError => ProtoStatus::StorageError,
             VMInvariantViolationError::InternalTypeError => ProtoStatus::InternalTypeError,
+            VMInvariantViolationError::EventKeyMismatch => ProtoStatus::EventKeyMismatch,
         }
     }
 }
@@ -856,6 +889,7 @@ impl FromProto for VMInvariantViolationError {
             ProtoError::LocalReferenceError => Ok(VMInvariantViolationError::LocalReferenceError),
             ProtoError::StorageError => Ok(VMInvariantViolationError::StorageError),
             ProtoError::InternalTypeError => Ok(VMInvariantViolationError::InternalTypeError),
+            ProtoError::EventKeyMismatch => Ok(VMInvariantViolationError::EventKeyMismatch),
             ProtoError::UnknownInvariantViolationError => {
                 bail_err!(DecodingError::UnknownInvariantViolationErrorEncountered)
             }
@@ -1040,6 +1074,12 @@ impl IntoProto for ExecutionStatus {
                 aborted.set_aborted_error_code(err_code);
                 exec_status.set_aborted(aborted)
             }
+            ExecutionStatus::ExecutionStackOverflow => {
+                exec_status.set_runtime_status(RuntimeStatus::ExecutionStackOverflow)
+            }
+            ExecutionStatus::CallStackOverflow => {
+                exec_status.set_runtime_status(RuntimeStatus::CallStackOverflow)
+            }
         };
         exec_status
     }
@@ -1084,6 +1124,10 @@ impl FromProto for ExecutionStatus {
                 ProtoRuntimeStatus::UnknownRuntimeStatus => {
                     bail_err!(DecodingError::UnknownRuntimeStatusEncountered)
                 }
+                ProtoRuntimeStatus::ExecutionStackOverflow => {
+                    Ok(ExecutionStatus::ExecutionStackOverflow)
+                }
+                ProtoRuntimeStatus::CallStackOverflow => Ok(ExecutionStatus::CallStackOverflow),
             }
         } else if proto_execution_status.has_arithmetic_error() {
             let err = proto_execution_status

@@ -11,7 +11,11 @@ use crate::{
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::collections::HashMap;
-use types::{account_address::AccountAddress, byte_array::ByteArray, language_storage::ModuleId};
+use types::{
+    account_address::{AccountAddress, ADDRESS_LENGTH},
+    byte_array::ByteArray,
+    language_storage::ModuleId,
+};
 use vm::{
     access::*,
     assert_ok,
@@ -175,7 +179,8 @@ where
             | Unpack(_, _)
             | Pack(_, _)
             | Call(_, _) => true,
-            CopyLoc(_) | MoveLoc(_) | StLoc(_) | BorrowLoc(_) | BorrowField(_) => true,
+            CopyLoc(_) | MoveLoc(_) | StLoc(_) | MutBorrowLoc(_) | ImmBorrowLoc(_)
+            | ImmBorrowField(_) | MutBorrowField(_) => true,
             _ => false,
         }
     }
@@ -345,7 +350,7 @@ where
         )
     }
 
-    fn fill_instruction_arg(&mut self) -> Bytecode {
+    fn fill_instruction_arg(&mut self) -> (Bytecode, usize) {
         use Bytecode::*;
         // For branching we need to know the size of the code within the top frame on the execution
         // stack (the frame that the instruction will be executing in) so that we don't jump off
@@ -365,21 +370,32 @@ where
         match self.op {
             BrTrue(_) => {
                 let index = self.next_bounded_index(frame_len as TableIndex);
-                BrTrue(index as CodeOffset)
+                (BrTrue(index as CodeOffset), 1)
             }
             BrFalse(_) => {
                 let index = self.next_bounded_index(frame_len as TableIndex);
-                BrFalse(index as CodeOffset)
+                (BrFalse(index as CodeOffset), 1)
             }
             Branch(_) => {
                 let index = self.next_bounded_index(frame_len as TableIndex);
-                Branch(index as CodeOffset)
+                (Branch(index as CodeOffset), 1)
             }
-            LdConst(_) => LdConst(self.next_int(&[])),
-            LdStr(_) => LdStr(self.next_string_idx()),
-            LdByteArray(_) => LdByteArray(self.next_bytearray_idx()),
-            LdAddr(_) => LdAddr(self.next_address_idx()),
-            _ => self.op.clone(),
+            LdConst(_) => {
+                let i = self.next_int(&[]);
+                (LdConst(i), 1)
+            }
+            LdStr(_) => {
+                let string_idx = self.next_string_idx();
+                let string_size = self.root_module.string_at(string_idx).len();
+                (LdStr(string_idx), string_size)
+            }
+            LdByteArray(_) => {
+                let bytearray_idx = self.next_bytearray_idx();
+                let bytearray_size = self.root_module.byte_array_at(bytearray_idx).len();
+                (LdByteArray(bytearray_idx), bytearray_size)
+            }
+            LdAddr(_) => (LdAddr(self.next_address_idx()), ADDRESS_LENGTH),
+            _ => (self.op.clone(), 0),
         }
     }
 
@@ -562,7 +578,7 @@ where
     // that we are aware of.
     fn generate_from_module_info(&mut self) -> StackState<'txn> {
         use Bytecode::*;
-        match self.op {
+        match &self.op {
             MoveToSender(_, _) => {
                 let struct_handle_idx = self.next_resource();
                 // We can just pick a random address -- this is incorrect by the bytecode semantics
@@ -706,7 +722,7 @@ where
                     HashMap::new(),
                 )
             }
-            BorrowField(_) => {
+            ImmBorrowField(_) | MutBorrowField(_) => {
                 // First grab a random struct
                 let struct_def_bound = self.root_module.struct_defs().len() as TableIndex;
                 let random_struct_idx =
@@ -726,10 +742,16 @@ where
                     .borrow_field(u32::from(field_index))
                     .expect("[BorrowField] Unable to borrow field of generated struct to get field size.")
                     .size();
+                let fdi = FieldDefinitionIndex::new(field_index);
+                let op = match self.op {
+                    ImmBorrowField(_) => ImmBorrowField(fdi),
+                    MutBorrowField(_) => MutBorrowField(fdi),
+                    _ => panic!("[BorrowField] Impossible case for op"),
+                };
                 StackState::new(
                     (self.root_module, None),
                     self.random_pad(vec![struct_stack]),
-                    BorrowField(FieldDefinitionIndex::new(field_index)),
+                    op,
                     field_size,
                     HashMap::new(),
                 )
@@ -745,7 +767,7 @@ where
                     HashMap::new(),
                 )
             }
-            CopyLoc(_) | MoveLoc(_) | BorrowLoc(_) => {
+            CopyLoc(_) | MoveLoc(_) | MutBorrowLoc(_) | ImmBorrowLoc(_) => {
                 let (module, local_idx, function_idx, frame_local) = self.next_local_state();
                 let size = frame_local.size();
                 let mut locals_mapping = HashMap::new();
@@ -800,13 +822,16 @@ where
                 acc.push(self.generate_from_type(x, &acc));
                 acc
             });
+            let (instr_arg, arg_size) = self.fill_instruction_arg();
             let size = starting_stack
                 .iter()
-                .fold(AbstractMemorySize::new(0), |acc, x| acc.add(x.size()));
+                .fold(AbstractMemorySize::new(arg_size as GasCarrier), |acc, x| {
+                    acc.add(x.size())
+                });
             StackState::new(
                 (self.root_module, None),
                 self.random_pad(starting_stack),
-                self.fill_instruction_arg(),
+                instr_arg,
                 size,
                 HashMap::new(),
             )
@@ -821,7 +846,7 @@ where
     pub fn stack_transition<P>(
         stk: &mut ExecutionStack<'alloc, 'txn, P>,
         stack_state: StackState<'alloc>,
-    ) -> Bytecode
+    ) -> (Bytecode, AbstractMemorySize<GasCarrier>)
     where
         P: ModuleCache<'alloc>,
     {
@@ -838,7 +863,7 @@ where
                 .expect("[Stack Transition] Unable to get top frame on execution stack.")
                 .store_local(local_index, local));
         }
-        stack_state.instr
+        (stack_state.instr, stack_state.size)
     }
 }
 

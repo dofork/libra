@@ -1,4 +1,5 @@
-// check: VerificationError { kind: FunctionDefinition, idx: 0, err: BorrowLocExistsBorrowError(6) }
+// check: VerificationError
+// check: BorrowLocExistsBorrowError
 
 module Tester {
     struct T{v: u64}
@@ -17,7 +18,7 @@ module Tester {
 
         new_t = Self.new(1);
         *move(t2) = move(new_t);
-        release(move(t));
+        _ = move(t);
         return;
     }
 
@@ -26,7 +27,7 @@ module Tester {
         let r: u64;
         ref_v = &copy(this).v;
         r = *move(ref_v);
-        release(move(this));
+        _ = move(this);
         return move(r);
     }
 

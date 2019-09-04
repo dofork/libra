@@ -9,14 +9,18 @@ use crate::{
     control_flow_graph::VMControlFlowGraph,
     nonce::Nonce,
 };
+use mirai_annotations::checked_verify;
 use std::collections::{BTreeMap, BTreeSet};
 use vm::{
     access::ModuleAccess,
     errors::VMStaticViolation,
-    file_format::{Bytecode, CompiledModule, FunctionDefinition, Kind, LocalIndex, SignatureToken},
+    file_format::{
+        Bytecode, CompiledModule, FieldDefinitionIndex, FunctionDefinition, Kind, LocalIndex,
+        SignatureToken,
+    },
     views::{
-        FunctionDefinitionView, FunctionSignatureView, LocalsSignatureView, SignatureTokenView,
-        StructDefinitionView, ViewInternals,
+        FunctionDefinitionView, FunctionSignatureView, LocalsSignatureView, ModuleView,
+        SignatureTokenView, StructDefinitionView, ViewInternals,
     },
 };
 
@@ -27,7 +31,7 @@ struct StackAbstractValue {
 }
 
 pub struct TypeAndMemorySafetyAnalysis<'a> {
-    module: &'a CompiledModule,
+    module_view: ModuleView<'a, CompiledModule>,
     function_definition_view: FunctionDefinitionView<'a, CompiledModule>,
     locals_signature_view: LocalsSignatureView<'a, CompiledModule>,
     stack: Vec<StackAbstractValue>,
@@ -41,6 +45,7 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
         function_definition: &'a FunctionDefinition,
         cfg: &'a VMControlFlowGraph,
     ) -> Vec<VMStaticViolation> {
+        let module_view = ModuleView::new(module);
         let function_definition_view = FunctionDefinitionView::new(module, function_definition);
         let locals_signature_view = function_definition_view.locals_signature();
         let function_signature_view = function_definition_view.signature();
@@ -62,7 +67,7 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
         // nonces in [0, locals_signature_view.len()) are reserved for constructing canonical state
         let next_nonce = locals_signature_view.len();
         let mut verifier = Self {
-            module,
+            module_view,
             function_definition_view: FunctionDefinitionView::new(module, function_definition),
             locals_signature_view,
             stack: vec![],
@@ -83,6 +88,10 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
         verifier.errors
     }
 
+    fn module(&self) -> &'a CompiledModule {
+        self.module_view.as_inner()
+    }
+
     fn get_nonce(&mut self, state: &mut AbstractState) -> Nonce {
         let nonce = Nonce::new(self.next_nonce);
         state.add_nonce(nonce.clone());
@@ -90,7 +99,7 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
         nonce
     }
 
-    fn freeze_ok(&self, state: &AbstractState, existing_borrows: BTreeSet<Nonce>) -> bool {
+    fn freeze_ok(&self, state: &AbstractState, existing_borrows: &BTreeSet<Nonce>) -> bool {
         for (arg_idx, arg_type_view) in self.locals_signature_view.tokens().enumerate() {
             if arg_type_view.as_inner().is_mutable_reference()
                 && state.is_available(arg_idx as LocalIndex)
@@ -118,6 +127,60 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
         existing_borrows.is_empty()
     }
 
+    fn is_readable_reference(
+        &self,
+        state: &AbstractState,
+        signature: &SignatureToken,
+        nonce: Nonce,
+    ) -> bool {
+        checked_verify!(signature.is_reference());
+        !signature.is_mutable_reference() || {
+            let borrowed_nonces = state.borrowed_nonces(nonce);
+            self.freeze_ok(state, &borrowed_nonces)
+        }
+    }
+
+    // helper for both `ImmBorrowFIeld` and `MutBorrowField`
+    fn verify_field_access(
+        &self,
+        operand: &StackAbstractValue,
+        field_definition_index: &FieldDefinitionIndex,
+        offset: usize,
+    ) -> Result<(), VMStaticViolation> {
+        let struct_handle_index =
+            match SignatureToken::get_struct_handle_from_reference(&operand.signature) {
+                Some(struct_handle_index) => struct_handle_index,
+                None => {
+                    return Err(VMStaticViolation::BorrowFieldTypeMismatchError(offset));
+                }
+            };
+        if !self
+            .module()
+            .is_field_in_struct(*field_definition_index, struct_handle_index)
+        {
+            return Err(VMStaticViolation::BorrowFieldBadFieldError(offset));
+        }
+
+        Ok(())
+    }
+
+    // helper for both `ImmBorrowLoc` and `MutBorrowLoc`
+    fn verify_borrow_loc(
+        &self,
+        state: &AbstractState,
+        loc_idx: &LocalIndex,
+        loc_signature: &SignatureToken,
+        offset: usize,
+    ) -> Result<(), VMStaticViolation> {
+        if loc_signature.is_reference() {
+            return Err(VMStaticViolation::BorrowLocReferenceError(offset));
+        }
+        if !state.is_available(*loc_idx) {
+            return Err(VMStaticViolation::BorrowLocUnavailableError(offset));
+        }
+        Ok(())
+    }
+
     fn execute_inner(
         &mut self,
         mut state: &mut AbstractState,
@@ -127,24 +190,16 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
         match bytecode {
             Bytecode::Pop => {
                 let operand = self.stack.pop().unwrap();
-                let kind = SignatureTokenView::new(self.module, &operand.signature).kind();
+                let kind = SignatureTokenView::new(self.module(), &operand.signature).kind();
                 if kind != Kind::Unrestricted {
-                    Err(VMStaticViolation::PopResourceError(offset))
-                } else if operand.value.is_reference() {
-                    Err(VMStaticViolation::PopReferenceError(offset))
-                } else {
-                    Ok(())
+                    return Err(VMStaticViolation::PopResourceError(offset));
                 }
-            }
 
-            Bytecode::ReleaseRef => {
-                let operand = self.stack.pop().unwrap();
                 if let AbstractValue::Reference(nonce) = operand.value {
                     state.destroy_nonce(nonce);
-                    Ok(())
-                } else {
-                    Err(VMStaticViolation::ReleaseRefTypeMismatchError(offset))
                 }
+
+                Ok(())
             }
 
             Bytecode::BrTrue(_) | Bytecode::BrFalse(_) => {
@@ -207,7 +262,7 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
                 if let SignatureToken::MutableReference(signature) = operand.signature {
                     let operand_nonce = operand.value.extract_nonce().unwrap().clone();
                     let borrowed_nonces = state.borrowed_nonces(operand_nonce.clone());
-                    if self.freeze_ok(&state, borrowed_nonces) {
+                    if self.freeze_ok(&state, &borrowed_nonces) {
                         self.stack.push(StackAbstractValue {
                             signature: SignatureToken::Reference(signature),
                             value: operand.value,
@@ -221,63 +276,74 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
                 }
             }
 
-            Bytecode::BorrowField(field_definition_index) => {
+            Bytecode::MutBorrowField(field_definition_index) => {
                 let operand = self.stack.pop().unwrap();
-                if let Some(struct_handle_index) =
-                    SignatureToken::get_struct_handle_from_reference(&operand.signature)
-                {
-                    if self
-                        .module
-                        .is_field_in_struct(*field_definition_index, struct_handle_index)
-                    {
-                        let field_signature = self
-                            .module
-                            .get_field_signature(*field_definition_index)
-                            .0
-                            .clone();
-                        let operand_nonce = operand.value.extract_nonce().unwrap().clone();
-                        let nonce = self.get_nonce(&mut state);
-                        if operand.signature.is_mutable_reference() {
-                            let borrowed_nonces = state.borrowed_nonces_for_field(
-                                *field_definition_index,
-                                operand_nonce.clone(),
-                            );
-                            if Self::write_borrow_ok(borrowed_nonces) {
-                                self.stack.push(StackAbstractValue {
-                                    signature: SignatureToken::MutableReference(Box::new(
-                                        field_signature.clone(),
-                                    )),
-                                    value: AbstractValue::Reference(nonce.clone()),
-                                });
-                                state.borrow_field_from_nonce(
-                                    *field_definition_index,
-                                    operand_nonce.clone(),
-                                    nonce,
-                                );
-                                state.destroy_nonce(operand_nonce);
-                            } else {
-                                return Err(
-                                    VMStaticViolation::BorrowFieldExistsMutableBorrowError(offset),
-                                );
-                            }
-                        } else {
-                            self.stack.push(StackAbstractValue {
-                                signature: SignatureToken::Reference(Box::new(field_signature)),
-                                value: AbstractValue::Reference(nonce.clone()),
-                            });
-                            state.borrow_field_from_nonce(
-                                *field_definition_index,
-                                operand_nonce.clone(),
-                                nonce,
-                            );
-                            state.destroy_nonce(operand_nonce);
-                        }
-                    } else {
-                        return Err(VMStaticViolation::BorrowFieldBadFieldError(offset));
-                    }
-                } else {
+                self.verify_field_access(&operand, field_definition_index, offset)?;
+
+                let operand_nonce = operand.value.extract_nonce().unwrap().clone();
+                let nonce = self.get_nonce(&mut state);
+                if !operand.signature.is_mutable_reference() {
                     return Err(VMStaticViolation::BorrowFieldTypeMismatchError(offset));
                 }
+
+                let borrowed_nonces =
+                    state.borrowed_nonces_for_field(*field_definition_index, operand_nonce.clone());
+                if !Self::write_borrow_ok(borrowed_nonces) {
+                    return Err(VMStaticViolation::BorrowFieldExistsMutableBorrowError(
+                        offset,
+                    ));
+                }
+
+                let field_signature = self
+                    .module()
+                    .get_field_signature(*field_definition_index)
+                    .0
+                    .clone();
+                self.stack.push(StackAbstractValue {
+                    signature: SignatureToken::MutableReference(Box::new(field_signature)),
+                    value: AbstractValue::Reference(nonce.clone()),
+                });
+                state.borrow_field_from_nonce(
+                    *field_definition_index,
+                    operand_nonce.clone(),
+                    nonce,
+                );
+                state.destroy_nonce(operand_nonce);
+                Ok(())
+            }
+
+            Bytecode::ImmBorrowField(field_definition_index) => {
+                let operand = self.stack.pop().unwrap();
+                self.verify_field_access(&operand, field_definition_index, offset)?;
+
+                let operand_nonce = operand.value.extract_nonce().unwrap().clone();
+                let nonce = self.get_nonce(&mut state);
+                // No checks needed for immutable case
+                if operand.signature.is_mutable_reference() {
+                    let borrowed_nonces = state
+                        .borrowed_nonces_for_field(*field_definition_index, operand_nonce.clone());
+                    if !self.freeze_ok(&state, &borrowed_nonces) {
+                        return Err(VMStaticViolation::BorrowFieldExistsMutableBorrowError(
+                            offset,
+                        ));
+                    }
+                }
+
+                let field_signature = self
+                    .module()
+                    .get_field_signature(*field_definition_index)
+                    .0
+                    .clone();
+                self.stack.push(StackAbstractValue {
+                    signature: SignatureToken::Reference(Box::new(field_signature)),
+                    value: AbstractValue::Reference(nonce.clone()),
+                });
+                state.borrow_field_from_nonce(
+                    *field_definition_index,
+                    operand_nonce.clone(),
+                    nonce,
+                );
+                state.destroy_nonce(operand_nonce);
                 Ok(())
             }
 
@@ -366,32 +432,66 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
                 }
             }
 
-            Bytecode::BorrowLoc(idx) => {
+            Bytecode::MutBorrowLoc(idx) => {
                 let signature = self.locals_signature_view.token_at(*idx).as_inner().clone();
-                if signature.is_reference() {
-                    Err(VMStaticViolation::BorrowLocReferenceError(offset))
-                } else if !state.is_available(*idx) {
-                    Err(VMStaticViolation::BorrowLocUnavailableError(offset))
-                } else if state.is_full(state.local(*idx)) {
-                    let nonce = self.get_nonce(&mut state);
-                    state.borrow_from_local_value(*idx, nonce.clone());
-                    self.stack.push(StackAbstractValue {
-                        signature: SignatureToken::MutableReference(Box::new(signature)),
-                        value: AbstractValue::Reference(nonce),
-                    });
-                    Ok(())
-                } else {
-                    Err(VMStaticViolation::BorrowLocExistsBorrowError(offset))
+                self.verify_borrow_loc(state, idx, &signature, offset)?;
+
+                if !state.is_full(state.local(*idx)) {
+                    return Err(VMStaticViolation::BorrowLocExistsBorrowError(offset));
                 }
+
+                let nonce = self.get_nonce(&mut state);
+                state.borrow_from_local_value(*idx, nonce.clone());
+                self.stack.push(StackAbstractValue {
+                    signature: SignatureToken::MutableReference(Box::new(signature)),
+                    value: AbstractValue::Reference(nonce),
+                });
+                Ok(())
+            }
+
+            Bytecode::ImmBorrowLoc(idx) => {
+                let signature = self.locals_signature_view.token_at(*idx).as_inner().clone();
+                self.verify_borrow_loc(state, idx, &signature, offset)?;
+
+                let borrowed_nonces = match state.local(*idx) {
+                    AbstractValue::Reference(_) => {
+                        // TODO This should really be a VMInvariantViolation
+                        // But it is not supported in the verifier currently
+                        return Err(VMStaticViolation::BorrowLocReferenceError(offset));
+                    }
+                    AbstractValue::Value(_, nonces) => nonces,
+                };
+                if !self.freeze_ok(state, &borrowed_nonces) {
+                    return Err(VMStaticViolation::BorrowLocExistsBorrowError(offset));
+                }
+
+                let nonce = self.get_nonce(&mut state);
+                state.borrow_from_local_value(*idx, nonce.clone());
+                self.stack.push(StackAbstractValue {
+                    signature: SignatureToken::Reference(Box::new(signature)),
+                    value: AbstractValue::Reference(nonce),
+                });
+                Ok(())
             }
 
             // TODO: Handle type actuals for generics
             Bytecode::Call(idx, _) => {
-                let function_handle = self.module.function_handle_at(*idx);
-                let function_signature =
-                    self.module.function_signature_at(function_handle.signature);
+                let function_handle = self.module().function_handle_at(*idx);
+                let function_signature = self
+                    .module()
+                    .function_signature_at(function_handle.signature);
+
+                let function_acquired_resources = self
+                    .module_view
+                    .function_acquired_resources(&function_handle);
+                for acquired_resource in &function_acquired_resources {
+                    if !state.global(*acquired_resource).is_empty() {
+                        return Err(VMStaticViolation::GlobalReferenceError(offset));
+                    }
+                }
+
                 let function_signature_view =
-                    FunctionSignatureView::new(self.module, function_signature);
+                    FunctionSignatureView::new(self.module(), function_signature);
                 let mut all_references_to_borrow_from = BTreeSet::new();
                 let mut mutable_references_to_borrow_from = BTreeSet::new();
                 for arg_type in function_signature.arg_types.iter().rev() {
@@ -431,17 +531,17 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
                         });
                     }
                 }
-                for x in all_references_to_borrow_from {
-                    state.destroy_nonce(x);
+                for nonce in all_references_to_borrow_from {
+                    state.destroy_nonce(nonce);
                 }
                 Ok(())
             }
 
             // TODO: Handle type actuals for generics
             Bytecode::Pack(idx, _) => {
-                let struct_definition = self.module.struct_def_at(*idx);
+                let struct_definition = self.module().struct_def_at(*idx);
                 let struct_definition_view =
-                    StructDefinitionView::new(self.module, struct_definition);
+                    StructDefinitionView::new(self.module(), struct_definition);
                 match struct_definition_view.fields() {
                     None => {
                         // TODO pack on native error
@@ -474,7 +574,7 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
 
             // TODO: Handle type actuals for generics
             Bytecode::Unpack(idx, _) => {
-                let struct_definition = self.module.struct_def_at(*idx);
+                let struct_definition = self.module().struct_def_at(*idx);
                 let struct_arg = self.stack.pop().unwrap();
                 if struct_arg.signature
                     != SignatureToken::Struct(struct_definition.struct_handle, vec![])
@@ -482,7 +582,7 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
                     return Err(VMStaticViolation::UnpackTypeMismatchError(offset));
                 }
                 let struct_definition_view =
-                    StructDefinitionView::new(self.module, struct_definition);
+                    StructDefinitionView::new(self.module(), struct_definition);
                 match struct_definition_view.fields() {
                     None => {
                         // TODO unpack on native error
@@ -503,48 +603,34 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
             }
 
             Bytecode::ReadRef => {
-                let operand = self.stack.pop().unwrap();
-                match operand.signature {
-                    SignatureToken::Reference(signature) => {
-                        let operand_nonce = operand.value.extract_nonce().unwrap().clone();
-                        let kind = SignatureTokenView::new(self.module, &signature).kind();
-                        match kind {
-                            Kind::All | Kind::Resource => {
-                                Err(VMStaticViolation::ReadRefResourceError(offset))
-                            }
-                            Kind::Unrestricted => {
-                                self.stack.push(StackAbstractValue {
-                                    signature: *signature,
-                                    value: AbstractValue::full_value(Kind::Unrestricted),
-                                });
-                                state.destroy_nonce(operand_nonce);
-                                Ok(())
-                            }
-                        }
+                let StackAbstractValue {
+                    signature: operand_signature,
+                    value: operand_value,
+                } = self.stack.pop().unwrap();
+                if !operand_signature.is_reference() {
+                    return Err(VMStaticViolation::ReadRefTypeMismatchError(offset));
+                }
+                let operand_nonce = operand_value.extract_nonce().unwrap();
+                if !self.is_readable_reference(state, &operand_signature, operand_nonce.clone()) {
+                    Err(VMStaticViolation::ReadRefExistsMutableBorrowError(offset))
+                } else {
+                    let inner_signature = *match operand_signature {
+                        SignatureToken::Reference(signature) => signature,
+                        SignatureToken::MutableReference(signature) => signature,
+                        _ => panic!("Unreachable"),
+                    };
+                    if SignatureTokenView::new(self.module(), &inner_signature).kind()
+                        != Kind::Unrestricted
+                    {
+                        Err(VMStaticViolation::ReadRefResourceError(offset))
+                    } else {
+                        self.stack.push(StackAbstractValue {
+                            signature: inner_signature,
+                            value: AbstractValue::full_value(Kind::Unrestricted),
+                        });
+                        state.destroy_nonce(operand_nonce.clone());
+                        Ok(())
                     }
-                    SignatureToken::MutableReference(signature) => {
-                        let operand_nonce = operand.value.extract_nonce().unwrap().clone();
-                        let kind = SignatureTokenView::new(self.module, &signature).kind();
-                        match kind {
-                            Kind::All | Kind::Resource => {
-                                Err(VMStaticViolation::ReadRefResourceError(offset))
-                            }
-                            Kind::Unrestricted => {
-                                let borrowed_nonces = state.borrowed_nonces(operand_nonce.clone());
-                                if self.freeze_ok(&state, borrowed_nonces) {
-                                    self.stack.push(StackAbstractValue {
-                                        signature: *signature,
-                                        value: AbstractValue::full_value(Kind::Unrestricted),
-                                    });
-                                    state.destroy_nonce(operand_nonce);
-                                    Ok(())
-                                } else {
-                                    Err(VMStaticViolation::ReadRefExistsMutableBorrowError(offset))
-                                }
-                            }
-                        }
-                    }
-                    _ => Err(VMStaticViolation::ReadRefTypeMismatchError(offset)),
                 }
             }
 
@@ -552,7 +638,7 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
                 let ref_operand = self.stack.pop().unwrap();
                 let val_operand = self.stack.pop().unwrap();
                 if let SignatureToken::MutableReference(signature) = ref_operand.signature {
-                    let kind = SignatureTokenView::new(self.module, &signature).kind();
+                    let kind = SignatureTokenView::new(self.module(), &signature).kind();
                     match kind {
                         Kind::Resource | Kind::All => {
                             Err(VMStaticViolation::WriteRefResourceError(offset))
@@ -630,14 +716,22 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
             Bytecode::Eq | Bytecode::Neq => {
                 let operand1 = self.stack.pop().unwrap();
                 let operand2 = self.stack.pop().unwrap();
-                let kind1 = SignatureTokenView::new(self.module, &operand1.signature).kind();
+                let kind1 = SignatureTokenView::new(self.module(), &operand1.signature).kind();
                 let is_copyable = kind1 == Kind::Unrestricted;
                 if is_copyable && operand1.signature == operand2.signature {
                     if let AbstractValue::Reference(nonce) = operand1.value {
-                        state.destroy_nonce(nonce);
+                        if self.is_readable_reference(state, &operand1.signature, nonce.clone()) {
+                            state.destroy_nonce(nonce);
+                        } else {
+                            return Err(VMStaticViolation::ReadRefExistsMutableBorrowError(offset));
+                        }
                     }
                     if let AbstractValue::Reference(nonce) = operand2.value {
-                        state.destroy_nonce(nonce);
+                        if self.is_readable_reference(state, &operand2.signature, nonce.clone()) {
+                            state.destroy_nonce(nonce);
+                        } else {
+                            return Err(VMStaticViolation::ReadRefExistsMutableBorrowError(offset));
+                        }
                     }
                     self.stack.push(StackAbstractValue {
                         signature: SignatureToken::Bool,
@@ -667,8 +761,9 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
 
             // TODO: Handle type actuals for generics
             Bytecode::Exists(idx, _) => {
-                let struct_definition = self.module.struct_def_at(*idx);
-                if !StructDefinitionView::new(self.module, struct_definition).is_nominal_resource()
+                let struct_definition = self.module().struct_def_at(*idx);
+                if !StructDefinitionView::new(self.module(), struct_definition)
+                    .is_nominal_resource()
                 {
                     return Err(VMStaticViolation::ExistsNoResourceError(offset));
                 }
@@ -687,8 +782,9 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
 
             // TODO: Handle type actuals for generics
             Bytecode::BorrowGlobal(idx, _) => {
-                let struct_definition = self.module.struct_def_at(*idx);
-                if !StructDefinitionView::new(self.module, struct_definition).is_nominal_resource()
+                let struct_definition = self.module().struct_def_at(*idx);
+                if !StructDefinitionView::new(self.module(), struct_definition)
+                    .is_nominal_resource()
                 {
                     return Err(VMStaticViolation::BorrowGlobalNoResourceError(offset));
                 } else if !state.global(*idx).is_empty() {
@@ -713,8 +809,9 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
 
             // TODO: Handle type actuals for generics
             Bytecode::MoveFrom(idx, _) => {
-                let struct_definition = self.module.struct_def_at(*idx);
-                if !StructDefinitionView::new(self.module, struct_definition).is_nominal_resource()
+                let struct_definition = self.module().struct_def_at(*idx);
+                if !StructDefinitionView::new(self.module(), struct_definition)
+                    .is_nominal_resource()
                 {
                     return Err(VMStaticViolation::MoveFromNoResourceError(offset));
                 } else if !state.global(*idx).is_empty() {
@@ -735,8 +832,9 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
 
             // TODO: Handle type actuals for generics
             Bytecode::MoveToSender(idx, _) => {
-                let struct_definition = self.module.struct_def_at(*idx);
-                if !StructDefinitionView::new(self.module, struct_definition).is_nominal_resource()
+                let struct_definition = self.module().struct_def_at(*idx);
+                if !StructDefinitionView::new(self.module(), struct_definition)
+                    .is_nominal_resource()
                 {
                     return Err(VMStaticViolation::MoveToSenderNoResourceError(offset));
                 }
@@ -785,20 +883,6 @@ impl<'a> TypeAndMemorySafetyAnalysis<'a> {
                 } else {
                     Err(VMStaticViolation::CreateAccountTypeMismatchError(offset))
                 }
-            }
-
-            Bytecode::EmitEvent => {
-                // TODO: EmitEvent is currently unimplemented
-                //       following is a workaround to skip the check
-                // However, the nonce must still be destroyed to ensure the type checker does not
-                // complain
-                self.stack.pop();
-                self.stack.pop();
-                let ref_operand = self.stack.pop().unwrap();
-                if let Some(ref_operand_nonce) = ref_operand.value.extract_nonce() {
-                    state.destroy_nonce(ref_operand_nonce.clone());
-                }
-                Ok(())
             }
         }
     }

@@ -277,13 +277,13 @@ lazy_static! {
             (Mul, 41, 1),
             (MoveLoc(0), 41, 1),
             (And, 49, 1),
-            (ReleaseRef, 28, 1),
             (GetTxnPublicKey, 41, 1),
             (Pop, 27, 1),
             (BitAnd, 44, 1),
             (ReadRef, 51, 1),
             (Sub, 44, 1),
-            (BorrowField(FieldDefinitionIndex::new(0)), 58, 1),
+            (MutBorrowField(FieldDefinitionIndex::new(0)), 58, 1),
+            (ImmBorrowField(FieldDefinitionIndex::new(0)), 58, 1),
             (Add, 45, 1),
             (CopyLoc(0), 41, 1),
             (StLoc(0), 28, 1),
@@ -291,7 +291,8 @@ lazy_static! {
             (Lt, 49, 1),
             (LdConst(0), 29, 1),
             (Abort, 39, 1),
-            (BorrowLoc(0), 45, 1),
+            (MutBorrowLoc(0), 45, 1),
+            (ImmBorrowLoc(0), 45, 1),
             (LdStr(StringPoolIndex::new(0)), 52, 1),
             (LdAddr(AddressPoolIndex::new(0)), 36, 1),
             (Ge, 46, 1),
@@ -321,9 +322,7 @@ lazy_static! {
             (LdByteArray(ByteArrayPoolIndex::new(0)), 56, 1),
             (Gt, 46, 1),
             (Pack(StructDefinitionIndex::new(0), NO_TYPE_ACTUALS), 73, 1),
-            // TODO/XXX: Need to get the cost for this still
-            (EmitEvent, 1, 1),
-            ];
+        ];
         CostTable::new(instrs)
     };
 }

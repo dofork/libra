@@ -3,7 +3,7 @@
 
 use crate::chained_bft::{
     common::{Author, Round},
-    consensus_types::proposal_msg::ProposalMsg,
+    consensus_types::block::Block,
 };
 
 /// ProposerElection incorporates the logic of choosing a leader among multiple candidates.
@@ -22,5 +22,15 @@ pub trait ProposerElection<T> {
     /// Notify proposer election about a new proposal. The function doesn't return any information:
     /// proposer election is going to notify the client about the chosen proposal via a dedicated
     /// channel (to be passed in constructor).
-    fn process_proposal(&self, proposal: ProposalMsg<T>) -> Option<ProposalMsg<T>>;
+    fn process_proposal(&mut self, proposal: Block<T>) -> Option<Block<T>>;
+
+    /// Take the highest ranked backup proposal if available for a given round
+    /// (removes it from the struct),
+    /// or returns None if no proposals have been received for a given round.
+    /// A backup proposal is a valid proposal that was not chosen immediately in the
+    /// `process_proposal()` return value.
+    ///
+    /// Note that once the backup proposal is taken and no other proposals are submitted, the
+    /// following take requests are going to return None.
+    fn take_backup_proposal(&mut self, round: Round) -> Option<Block<T>>;
 }

@@ -3,17 +3,20 @@
 //! Used to perform catching up between nodes for committed states.
 //! Used for node restarts, network partitions, full node syncs
 #![feature(async_await)]
-use types::account_address::AccountAddress;
+#![recursion_limit = "1024"]
+use crypto::ed25519::*;
+use types::{account_address::AccountAddress, ledger_info::LedgerInfoWithSignatures};
 
-pub use coordinator::SyncStatus;
 pub use synchronizer::{StateSyncClient, StateSynchronizer};
 
 mod coordinator;
 mod counters;
-mod downloader;
+mod executor_proxy;
+mod peer_manager;
 mod synchronizer;
 
 type PeerId = AccountAddress;
+type LedgerInfo = LedgerInfoWithSignatures<Ed25519Signature>;
 
 #[cfg(test)]
 mod tests;

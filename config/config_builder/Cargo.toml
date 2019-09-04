@@ -7,16 +7,12 @@ publish = false
 edition = "2018"
 
 [dependencies]
-bincode = "1.1.1"
-clap = "2.32"
-hex = "0.3.2"
+clap = { version = "2.33.0", default-features = false }
+hex = { version = "0.3.2", default-features = false }
 rand = "0.6.5"
-serde = { version = "1.0.96", features = ["derive"] }
-tempfile = "3.1.0"
-toml = "0.4"
 
 config = { path = ".." }
-nextgen_crypto = { path = "../../crypto/nextgen_crypto" }
+crypto = { path = "../../crypto/crypto" }
 failure = { path = "../../common/failure_ext", package = "failure_ext" }
 generate_keypair = { path = "../generate_keypair" }
 proto_conv = { path = "../../common/proto_conv", features = ["derive"] }

@@ -75,7 +75,10 @@ impl Cluster {
                 break;
             }
         }
-        ensure!(!instances.is_empty(), "instances.txt is empty");
+        ensure!(
+            !instances.is_empty(),
+            "Non instances were discovered for cluster"
+        );
         Ok(Self { instances })
     }
 
@@ -86,5 +89,27 @@ impl Cluster {
 
     pub fn instances(&self) -> &Vec<Instance> {
         &self.instances
+    }
+
+    pub fn get_instance(&self, name: &str) -> Option<&Instance> {
+        for instance in &self.instances {
+            if instance.short_hash() == name {
+                return Some(instance);
+            }
+        }
+        None
+    }
+
+    pub fn sub_cluster(&self, ids: Vec<String>) -> Cluster {
+        let mut instances = Vec::with_capacity(ids.len());
+        for id in ids {
+            let instance = self.get_instance(&id);
+            match instance {
+                Some(instance) => instances.push(instance.clone()),
+                None => panic!("Can not make sub_cluster: instance {} is not found", id),
+            }
+        }
+        assert!(!instances.is_empty(), "No instances for subcluster");
+        Cluster { instances }
     }
 }
