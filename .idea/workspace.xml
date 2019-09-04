@@ -13,9 +13,6 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="7167f930-42f2-48f5-8696-7b9b26992bcb" name="Default Changelist" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/src/client_front.rs" beforeDir="false" afterPath="$PROJECT_DIR$/client/src/client_front.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rocket/examples/libra/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/rocket/examples/libra/Cargo.toml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/rocket/examples/libra/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/rocket/examples/libra/src/main.rs" afterDir="false" />
     </list>
     <option name="EXCLUDED_CONVERTED_TO_IGNORED" value="true" />
