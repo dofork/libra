@@ -330,6 +330,14 @@
       <sourceFolder url="file://$MODULE_DIR$/execution/execution_service/examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/execution/execution_service/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/execution/execution_service/benches" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crypto/crypto/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crypto/crypto/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crypto/crypto/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crypto/crypto/benches" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crypto/crypto_derive/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crypto/crypto_derive/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crypto/crypto_derive/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crypto/crypto_derive/benches" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/admission_control/admission_control_proto/target" />
       <excludeFolder url="file://$MODULE_DIR$/admission_control/admission_control_service/target" />
       <excludeFolder url="file://$MODULE_DIR$/benchmark/target" />
@@ -358,6 +366,8 @@
       <excludeFolder url="file://$MODULE_DIR$/config/generate_keypair/target" />
       <excludeFolder url="file://$MODULE_DIR$/config/target" />
       <excludeFolder url="file://$MODULE_DIR$/consensus/target" />
+      <excludeFolder url="file://$MODULE_DIR$/crypto/crypto/target" />
+      <excludeFolder url="file://$MODULE_DIR$/crypto/crypto_derive/target" />
       <excludeFolder url="file://$MODULE_DIR$/crypto/legacy_crypto/src/macros/target" />
       <excludeFolder url="file://$MODULE_DIR$/crypto/legacy_crypto/target" />
       <excludeFolder url="file://$MODULE_DIR$/crypto/nextgen_crypto/target" />

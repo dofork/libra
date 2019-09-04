@@ -21,42 +21,6 @@ use std::sync::Mutex;
 
 //pub type Result<T> = std::result::Result<T, Error>;
 
-pub struct User {
-    /// Wallet libray managing user account
-    wallet: Mutex<WalletLibrary>,
-}
-
-impl  User {
-
-    pub fn new() -> Self {
-        let wallet = Mutex::new(WalletLibrary::new()); //请看get_libra_wallet后半部分
-        User{wallet,}
-    }
-
-    pub fn get_mnemonic(& self) -> String {
-        let mut wlt =self.wallet.lock().unwrap();
-        let mnemonic = wlt.mnemonic();
-        wlt.new_address();
-        mnemonic
-    }
-
-    pub fn get_publick_key(& self) -> String {
-        let wlt =self.wallet.lock().unwrap();
-        let addresses = wlt.get_addresses();
-        match addresses {
-            Ok(addresses) => {
-                let address = addresses[0];
-
-                address.short_str()
-            }
-            Err(_error) => {
-                "get_publick_key error".to_string()
-            }
-        }
-    }
-
-}
-
 pub struct  FrontController {
     client : Mutex<ClientFront>,
 }
@@ -94,7 +58,7 @@ impl FrontController {
         }
     }
 
-    pub fn mint(&self,receiver_address_decoded:String,num_coins:u64)
+    pub fn mint(&self,receiver_address_decoded:String,num_coins:String)
     {
         let mut client = self.client.lock().unwrap();
         client.mint_coins_v2(receiver_address_decoded,num_coins,true);
@@ -129,7 +93,7 @@ fn create_account(controller : State<FrontController>) -> String
 }
 
 #[get("/mint/<receiver_address>/<num_coins>")]
-fn mint(controller : State<FrontController> ,receiver_address:String,num_coins:u64) -> String
+fn mint(controller : State<FrontController> ,receiver_address:String,num_coins:String) -> String
 {
     controller.mint(receiver_address,num_coins);
     "mint finished".to_string()

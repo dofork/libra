@@ -5,12 +5,12 @@
 use crate::{commands::*, grpc_client::GRPCClient, AccountData, AccountStatus};
 use admission_control_proto::proto::admission_control::SubmitTransactionRequest;
 use config::trusted_peers::TrustedPeersConfig;
+use crypto::{ed25519::*, test_utils::KeyPair};
 use failure::prelude::*;
 use futures::{future::Future, stream::Stream};
 use hyper;
 use libra_wallet::{io_utils, wallet_library::WalletLibrary};
 use logger::prelude::*;
-use nextgen_crypto::{ed25519::*, test_utils::KeyPair};
 use num_traits::{
     cast::{FromPrimitive, ToPrimitive},
     identities::Zero,
@@ -40,11 +40,12 @@ use types::{
     },
     account_state_blob::{AccountStateBlob, AccountStateWithProof},
     contract_event::{ContractEvent, EventWithProof},
-    transaction::{parse_as_transaction_argument, Program, SignedTransaction, Version},
-    transaction_helpers::{create_signed_txn, TransactionSigner},
+    transaction::{
+        parse_as_transaction_argument, Program, RawTransaction, SignedTransaction, Version,
+    },
+    transaction_helpers::{create_signed_txn, create_unsigned_txn, TransactionSigner},
     validator_verifier::ValidatorVerifier,
 };
-
 
 const CLIENT_WALLET_MNEMONIC_FILE: &str = "client.mnemonic";
 const GAS_UNIT_PRICE: u64 = 0;
@@ -180,14 +181,38 @@ impl ClientFront {
 
 
     ///Mints coins for the receiver specified version 2
-    pub fn mint_coins_v2(&mut self,receiver_address_decoded:String,num_coins: u64, is_blocking:bool) -> Result<()>{
+    pub fn mint_coins_v2(&mut self,receiver_address_decoded:String,num_coins: String, is_blocking:bool) -> Result<()>{
         let receiver = ClientFront::address_from_strings(&receiver_address_decoded)?;
+        let micro_num_coins = Self::convert_to_micro_libras(&num_coins)?;
         match self.faucet_account {
-            Some(_) => self.mint_coins_with_local_faucet_account(&receiver, num_coins, is_blocking),
-            None => self.mint_coins_with_faucet_service(&receiver, num_coins, is_blocking),
+            Some(_) => self.mint_coins_with_local_faucet_account(&receiver, micro_num_coins, is_blocking),
+            None => self.mint_coins_with_faucet_service(&receiver, micro_num_coins, is_blocking),
         }
     }
 
+    /// convert number of Libras (main unit) given as string to number of micro Libras
+    pub fn convert_to_micro_libras(input: &str) -> Result<u64> {
+        ensure!(!input.is_empty(), "Empty input not allowed for libra unit");
+        // This is not supposed to panic as it is used as constant here.
+        let max_value = Decimal::from_u64(std::u64::MAX).unwrap() / Decimal::new(1_000_000, 0);
+        let scale = input.find('.').unwrap_or(input.len() - 1);
+        ensure!(
+            scale <= 14,
+            "Input value is too big: {:?}, max: {:?}",
+            input,
+            max_value
+        );
+        let original = Decimal::from_str(input)?;
+        ensure!(
+            original <= max_value,
+            "Input value is too big: {:?}, max: {:?}",
+            input,
+            max_value
+        );
+        let value = original * Decimal::new(1_000_000, 0);
+        ensure!(value.fract().is_zero(), "invalid value");
+        value.to_u64().ok_or_else(|| format_err!("invalid value"))
+    }
 
     /// Waits for the next transaction for a specific address and prints it
     pub fn wait_for_transaction(&mut self, account: AccountAddress, sequence_number: u64) {

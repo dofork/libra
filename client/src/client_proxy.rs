@@ -691,7 +691,8 @@ impl ClientProxy {
     /// it to address, otherwise, try to convert to u64 and looking at TestClient::accounts.
     pub fn get_account_address_from_parameter(&self, para: &str) -> Result<AccountAddress> {
         match is_address(para) {
-            true => ClientProxy::address_from_strings(para),
+            true => ClientProxy::address_from_strings
+                (para),
             false => {
                 let account_ref_id = para.parse::<usize>().map_err(|error| {
                     format_parse_data_error(
@@ -972,7 +973,7 @@ impl ClientProxy {
             self.faucet_server, num_coins, receiver
         )
         .parse::<hyper::Uri>()?;
-
+        println!("http://{}?amount={}&address={:?}", self.faucet_server, num_coins, receiver);
         let request = hyper::Request::post(url).body(hyper::Body::empty())?;
         let response = runtime.block_on(client.request(request))?;
         let status_code = response.status();

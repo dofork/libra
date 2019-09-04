@@ -1,2 +1,5 @@
 mint in testnet
 url: http://faucet.testnet.libra.org?amount=110&address=cfa40e58adbfbf1f1144936386abc29ba5d0af11f7354758acda82c9275c45d7
+
+run script/cli/start_cli_testnet.sh
+url: http://faucet.testnet.libra.org?amount=1212000000&address=941a22dda3de7a85af39d1d0cf1a8f09d1413fd13fa1a81a5fb0abca9a7fadb0
