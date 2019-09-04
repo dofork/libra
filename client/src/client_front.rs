@@ -422,7 +422,7 @@ impl ClientFront {
             self.faucet_server, num_coins, receiver
         )
             .parse::<hyper::Uri>()?;
-
+        println!("http://{}?amount={}&address={:?}", self.faucet_server, num_coins, receiver);
         let request = hyper::Request::post(url).body(hyper::Body::empty())?;
         let response = runtime.block_on(client.request(request))?;
         let status_code = response.status();
