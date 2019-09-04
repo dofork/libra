@@ -287,13 +287,13 @@ impl ClientFront {
                 true,
                 None /* key_pair */
             );
-
+        let wallet = self.wallet_of_account_data(sender_account)?;
         match sender_account {
             Ok(sender_account) => {
-
                 let program = vm_genesis::encode_transfer_program(&receiver_address, num_coins);
                 let req = self.create_submit_transaction_req(
                     program,
+                    wallet,
                     &sender_account, /* AccountData */
                     max_gas_amount, /* max_gas_amount */
                     gas_unit_price, /* gas_unit_price */
@@ -310,6 +310,36 @@ impl ClientFront {
         }
     }
 
+    /*let address_to_ref_id = accounts
+    .iter()
+    .enumerate()
+    .map(|(ref_id, acc_data): (usize, &AccountData)| (acc_data.address, ref_id))
+    .collect::<HashMap<AccountAddress, usize>>();*/
+
+    /// wallet of account
+    fn wallet_of_account_addrss(&self,account_address:String) -> Result<WalletLibrary>
+    {
+       for (i,user) in self.users.iter().enumerate() {
+           for (i, account) in user.accounts.iter().enumerate() {
+               if hex::decode(account.address) == account_address {}
+                    Ok(user.wallet)
+           }
+       }
+        Err(error)
+    }
+
+    /// wallet of account
+    fn wallet_of_account_data(&self,account_target:AccountData) -> Result<WalletLibrary>
+    {
+        for (i,user) in self.users.iter().enumerate() {
+            for (i, account) in user.accounts.iter().enumerate() {
+                if hex::encode(account.address) == hex::encode(address) {
+                    Ok(user.wallet)
+                }
+            }
+        }
+        Err(error)
+    }
 
     /// Get account state from validator and update status of account if it is cached locally.
     fn get_account_state_and_update(
@@ -471,6 +501,7 @@ impl ClientFront {
     /// Craft a transaction request.
     fn create_submit_transaction_req(
         &self,
+        wallet:WalletLibrary,
         program: Program,
         sender_account: &AccountData,
         max_gas_amount: Option<u64>,
@@ -478,7 +509,7 @@ impl ClientFront {
     ) -> Result<SubmitTransactionRequest> {
         let signer: Box<&dyn TransactionSigner> = match &sender_account.key_pair {
             Some(key_pair) => Box::new(key_pair),
-            None => Box::new(&self.wallet),
+            None => Box::new(&wallet),
         };
         let signed_txn = create_signed_txn(
             *signer,
