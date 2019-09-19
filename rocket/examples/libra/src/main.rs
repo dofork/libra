@@ -73,13 +73,13 @@ impl FrontController {
     pub fn transfer_coins(
         &self,sender_address : String,
         receiver_address : String,
-        coins : u64,
+        coins : String,
         gas_unit_price : u64,
         max_gas : u64
     ) {
 
         let mut client = self.client.lock().unwrap();
-        client.transfer_coins_v2(&sender_address, &receiver_address, coins, Option::from(gas_unit_price), Option::from(max_gas), true);
+        client.transfer_coins_v2(&sender_address, &receiver_address, &coins,None, None, true);
     }
 
 }
@@ -110,7 +110,7 @@ fn transfer_coins(
     controller : State<FrontController>,
     sender_address : String,
     receiver_address : String,
-    coins : u64,
+    coins : String,
     gas_unit_price : u64,
     max_gas : u64
 ) {
@@ -122,5 +122,5 @@ fn transfer_coins(
 fn main() {
 
     let controller = FrontController::new();
-    rocket::ignite().manage(controller).mount("/", routes![create_account,get_balance,mint]).launch();
+    rocket::ignite().manage(controller).mount("/", routes![create_account,get_balance,mint,transfer_coins]).launch();
 }
