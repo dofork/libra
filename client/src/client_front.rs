@@ -15,35 +15,33 @@ use num_traits::{
     cast::{FromPrimitive, ToPrimitive},
     identities::Zero,
 };
+use libra_wallet::{mnemonic::Mnemonic};
 use proto_conv::IntoProto;
 use rust_decimal::Decimal;
-use serde_json;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{ HashMap},
     convert::TryFrom,
-    fmt, fs,
-    io::{stdout, Seek, SeekFrom, Write},
-    path::{Display, Path},
-    process::{Command, Stdio},
+     fs,
+    io::{stdout,   Write},
+    path::{ Path},
     str::{self, FromStr},
     sync::Arc,
     thread, time,
 };
-use tempfile::{NamedTempFile, TempPath};
+use tempfile::{TempPath};
 use tokio::{self, runtime::Runtime};
 use types::{
-    access_path::AccessPath,
     account_address::{AccountAddress, ADDRESS_LENGTH},
     account_config::{
-        account_received_event_path, account_sent_event_path, association_address,
-        core_code_address, get_account_resource_or_default, AccountResource,
+          association_address,
+         get_account_resource_or_default, AccountResource,
     },
-    account_state_blob::{AccountStateBlob, AccountStateWithProof},
-    contract_event::{ContractEvent, EventWithProof},
+    account_state_blob::{AccountStateBlob},
+
     transaction::{
-        parse_as_transaction_argument, Program, RawTransaction, SignedTransaction, Version,
+         Program, Version,
     },
-    transaction_helpers::{create_signed_txn, create_unsigned_txn, TransactionSigner},
+    transaction_helpers::{create_signed_txn, TransactionSigner},
     validator_verifier::ValidatorVerifier,
 };
 
@@ -75,8 +73,6 @@ pub struct ClientFront {
     pub faucet_account: Option<AccountData>,
     /// Wallet library managing user accounts.
     wallet: WalletLibrary,
-    /// Whether to sync with validator on account creation.
-    sync_on_wallet_recovery: bool,
     /// temp files (alive for duration of program)
     temp_files: Vec<TempPath>,
     /// host users
@@ -90,7 +86,6 @@ impl ClientFront {
         ac_port: &str,
         validator_set_file: &str,
         faucet_account_file: &str,
-        sync_on_wallet_recovery: bool,
         faucet_server: Option<String>,
         mnemonic_file: Option<String>,
     ) -> Result<Self> {
@@ -147,7 +142,6 @@ impl ClientFront {
             faucet_server,
             faucet_account,
             wallet: Self::get_libra_wallet(mnemonic_file)?,
-            sync_on_wallet_recovery,
             temp_files: vec![],
             users:vec![],
         })
@@ -172,7 +166,7 @@ impl ClientFront {
         let address = ClientFront::address_from_strings(&account_address_decoded)?;
         self.get_account_resource_and_update(address).map(|res| {
             let whole_num = res.balance() / 1_000_000;
-            let remainder = res.balance() % 1_000_000;
+            //let remainder = res.balance() % 1_000_000;
             //format!("{}.{:0>6}", whole_num.to_string(), remainder.to_string())
             whole_num
         })
@@ -310,19 +304,37 @@ impl ClientFront {
             }
         }
     }
+    /// recover_wallet_v2
+        /// create by hebo
+    pub fn recovery_wallet_v2(&mut self, mnemonic_string : &String) -> Result<(String)>
+    {
+        let mnemonic = Mnemonic::from(&mnemonic_string[..])?;
+        let mut wallet = WalletLibrary::new_from_mnemonic(mnemonic);
+        let (address,_child_number) = wallet.new_address()?;
 
-    /*let address_to_ref_id = accounts
-    .iter()
-    .enumerate()
-    .map(|(ref_id, acc_data): (usize, &AccountData)| (acc_data.address, ref_id))
-    .collect::<HashMap<AccountAddress, usize>>();*/
+        let account =
+            Self::get_account_data_from_address(
+                &self.client, address,
+                true,
+                None /* key_pair */
+            );
+        if let Err(_) = self.wallet_of_account_data(account.unwrap()) {
+            let account_data = Self::get_account_data_from_address(&self.client,address,true,None)?;
+            let a_user = User { wallet:wallet, accounts:vec![account_data],};
+            self.users.push(a_user);
+        };
+
+        let address_human = hex::encode(address);
+        Ok(address_human)
+    }
+
 
 
     /// wallet of account
     fn wallet_of_account_data(&self,account_target:AccountData) -> Result<(&WalletLibrary,Result<AccountData>)>
     {
-        for (i,user) in self.users.iter().enumerate() {
-            for (i, account) in user.accounts.iter().enumerate() {
+        for (_i,user) in self.users.iter().enumerate() {
+            for (_i, account) in user.accounts.iter().enumerate() {
                 if hex::encode(account.address) == hex::encode(account_target.address) {
                     return Ok((&user.wallet,Ok(account_target)))
                 }

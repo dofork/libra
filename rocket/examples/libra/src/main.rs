@@ -10,13 +10,10 @@ extern crate client;
 //extern crate failure;
 
 const CLIENT_WALLET_MNEMONIC_FILE:&str = "client.mnemonic";
-use libra_wallet::{io_utils, wallet_library::WalletLibrary};
 use client::{client_front::ClientFront};
 //pub use failure::Erorr;
 
 use rocket::request::State;
-use rocket::{Request, Data, Response};
-use rocket::http::{Method, ContentType, Status};
 use std::sync::Mutex;
 
 //pub type Result<T> = std::result::Result<T, Error>;
@@ -37,7 +34,6 @@ impl FrontController {
                 &port,
                 &validator_set_file,
                 &"",//&faucet_account_file,
-                false,//args.sync,
                 None,//args.faucet_server,
                 None,//args.mnemonic_file,
             ).unwrap()
@@ -74,12 +70,23 @@ impl FrontController {
         &self,sender_address : String,
         receiver_address : String,
         coins : String,
-        gas_unit_price : u64,
-        max_gas : u64
+        _gas_unit_price : u64,
+        _max_gas : u64
     ) {
 
         let mut client = self.client.lock().unwrap();
         client.transfer_coins_v2(&sender_address, &receiver_address, &coins,None, None, true);
+    }
+
+    pub fn recovery_wallet(
+        &self,
+        mnemonic : String
+    ) -> (String) {
+        let mut client = self.client.lock().unwrap();
+        match client.recovery_wallet_v2(&mnemonic){
+            Ok(address) => { address }
+            Err(_error) => { "".to_string() }
+        }
     }
 
 }
@@ -117,10 +124,15 @@ fn transfer_coins(
     controller.transfer_coins(sender_address,receiver_address,coins,gas_unit_price,max_gas);
 }
 
-
+#[get("/recover_wallet/<mnemonic>")]
+fn recovery_wallet(
+    controller : State<FrontController>,
+    mnemonic : String
+) -> String {
+    controller.recovery_wallet(mnemonic)
+}
 
 fn main() {
-
     let controller = FrontController::new();
-    rocket::ignite().manage(controller).mount("/", routes![create_account,get_balance,mint,transfer_coins]).launch();
+    rocket::ignite().manage(controller).mount("/", routes![create_account,get_balance,mint,transfer_coins,recovery_wallet]).launch();
 }
