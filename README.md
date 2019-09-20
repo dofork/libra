@@ -45,5 +45,5 @@ Step3: Build the restful wallet
 cd libra/rocket/examples/libra
 cargo run
 ```
-Step4:
+
 The restful wallet will launched from http://localhost:8000
