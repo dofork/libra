@@ -8,9 +8,13 @@
       <configuration PROFILE_NAME="Debug" CONFIG_NAME="Debug" />
     </configurations>
   </component>
+  <component name="CargoProjects">
+    <cargoProject FILE="$PROJECT_DIR$/Cargo.toml" />
+  </component>
   <component name="ChangeListManager">
-    <list default="true" id="7bc2bde9-8dd7-4c96-a3b9-b2b9f59cae89" name="Default Changelist" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    <list default="true" id="7bc2bde9-8dd7-4c96-a3b9-b2b9f59cae89" name="Default Changelist" comment="add clion project file">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/note" beforeDir="false" afterPath="$PROJECT_DIR$/note" afterDir="false" />
     </list>
     <option name="EXCLUDED_CONVERTED_TO_IGNORED" value="true" />
     <option name="SHOW_DIALOG" value="false" />
@@ -30,6 +34,7 @@
   <component name="ProjectId" id="1R5F4UB1JZdU9B31GllmQbslkVz" />
   <component name="PropertiesComponent">
     <property name="WebServerToolWindowFactoryState" value="false" />
+    <property name="org.rust.cargo.project.model.PROJECT_DISCOVERY" value="true" />
   </component>
   <component name="RunDashboard">
     <option name="ruleStates">
@@ -46,7 +51,7 @@
   <component name="RunManager" selected="Cargo Command.restlibra">
     <configuration name="libra" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
       <option name="channel" value="DEFAULT" />
-      <option name="command" value="run -- --host ac.testnet.libra.org --port 8000 -s $PROJECT_DIR$/scripts/cli/trusted_peers.config.toml" />
+      <option name="command" value="run -- --host ac.testnet.libra.org --port 8000 -s $PROJECT_DIR$/rocket/examples/libra/trusted_peers.config.toml" />
       <option name="allFeatures" value="false" />
       <option name="nocapture" value="false" />
       <option name="emulateTerminal" value="false" />
@@ -75,6 +80,9 @@
       <item itemvalue="Cargo Command.libra" />
     </list>
   </component>
+  <component name="RustProjectSettings">
+    <option name="toolchainHomeDirectory" value="$USER_HOME$/.cargo/bin" />
+  </component>
   <component name="SvnConfiguration">
     <configuration />
   </component>
@@ -85,8 +93,17 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1568948858714</updated>
-      <workItem from="1568948859830" duration="740000" />
+      <workItem from="1568948859830" duration="784000" />
+      <workItem from="1568949664667" duration="922000" />
     </task>
+    <task id="LOCAL-00001" summary="add clion project file">
+      <created>1568949620148</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1568949620148</updated>
+    </task>
+    <option name="localTasksCounter" value="2" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -97,10 +114,16 @@
       <map>
         <entry key="MAIN">
           <value>
-            <State />
+            <State>
+              <option name="COLUMN_ORDER" />
+            </State>
           </value>
         </entry>
       </map>
     </option>
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="add clion project file" />
+    <option name="LAST_COMMIT_MESSAGE" value="add clion project file" />
   </component>
 </project>
