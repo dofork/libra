@@ -124,7 +124,7 @@ fn transfer_coins(
     controller.transfer_coins(sender_address,receiver_address,coins,gas_unit_price,max_gas);
 }
 
-#[get("/recover_wallet/<mnemonic>")]
+#[get("/recovery_wallet/<mnemonic>")]
 fn recovery_wallet(
     controller : State<FrontController>,
     mnemonic : String
