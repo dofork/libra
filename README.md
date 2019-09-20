@@ -47,3 +47,8 @@ cargo run
 ```
 
 The restful wallet will launched from http://localhost:8000
+
+Connect me if you have any question.
+Mail:147796352@qq.com
+WeChat:18682186902
+
