@@ -12,9 +12,7 @@
     <cargoProject FILE="$PROJECT_DIR$/Cargo.toml" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="7167f930-42f2-48f5-8696-7b9b26992bcb" name="Default Changelist" comment="">
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-    </list>
+    <list default="true" id="7167f930-42f2-48f5-8696-7b9b26992bcb" name="Default Changelist" comment="" />
     <option name="EXCLUDED_CONVERTED_TO_IGNORED" value="true" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -95,7 +93,7 @@
       <workItem from="1567130508540" duration="17135000" />
       <workItem from="1567331529492" duration="132000" />
       <workItem from="1567332453949" duration="7822000" />
-      <workItem from="1568950631718" duration="123000" />
+      <workItem from="1568950631718" duration="293000" />
     </task>
     <task id="LOCAL-00001" summary="add client">
       <created>1567131180667</created>
@@ -111,7 +109,14 @@
       <option name="project" value="LOCAL" />
       <updated>1567158097992</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="add contact info">
+      <created>1568950783133</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1568950783133</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -133,7 +138,8 @@
   <component name="VcsManagerConfiguration">
     <MESSAGE value="add client" />
     <MESSAGE value="add create_account" />
-    <option name="LAST_COMMIT_MESSAGE" value="add create_account" />
+    <MESSAGE value="add contact info" />
+    <option name="LAST_COMMIT_MESSAGE" value="add contact info" />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
