@@ -25,13 +25,13 @@ impl FrontController {
     pub fn new() -> Self{
 
         let host = "ac.testnet.libra.org";
-        let port = "8000";
+        let port = 8000;
         let validator_set_file = "/home/dofork/Code/libra/rocket/examples/libra/trusted_peers.config.toml";
 
         let client = Mutex::new(
             ClientFront::new(
-                &host,
-                &port,
+                host,
+                port,
                 &validator_set_file,
                 &"",//&faucet_account_file,
                 None,//args.faucet_server,

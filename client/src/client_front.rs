@@ -4,11 +4,10 @@
 
 use crate::{commands::*, grpc_client::GRPCClient, AccountData, AccountStatus};
 use admission_control_proto::proto::admission_control::SubmitTransactionRequest;
-use config::trusted_peers::TrustedPeersConfig;
+use config::{config::PersistableConfig, trusted_peers::ConsensusPeersConfig};
 use crypto::{ed25519::*, test_utils::KeyPair};
 use failure::prelude::*;
 use futures::{future::Future, stream::Stream};
-use hyper;
 use libra_wallet::{io_utils, wallet_library::WalletLibrary};
 use logger::prelude::*;
 use num_traits::{
@@ -23,13 +22,12 @@ use std::{
     convert::TryFrom,
      fs,
     io::{stdout,   Write},
-    path::{ Path},
+    path::{ Path,PathBuf},
     str::{self, FromStr},
     sync::Arc,
     thread, time,
 };
-use tempfile::{TempPath};
-use tokio::{self, runtime::Runtime};
+use tools::tempdir::TempPath;
 use types::{
     account_address::{AccountAddress, ADDRESS_LENGTH},
     account_config::{
@@ -39,7 +37,7 @@ use types::{
     account_state_blob::{AccountStateBlob},
 
     transaction::{
-         Program, Version,
+         Program, Version,Script,TransactionPayload
     },
     transaction_helpers::{create_signed_txn, TransactionSigner},
     validator_verifier::ValidatorVerifier,
@@ -74,7 +72,7 @@ pub struct ClientFront {
     /// Wallet library managing user accounts.
     wallet: WalletLibrary,
     /// temp files (alive for duration of program)
-    temp_files: Vec<TempPath>,
+    temp_files: Vec<PathBuf>,
     /// host users
     users:Vec<User>,
 }
@@ -83,14 +81,13 @@ impl ClientFront {
     /// Construct a new TestClient.
     pub fn new(
         host: &str,
-        ac_port: &str,
+        ac_port: u16,
         validator_set_file: &str,
         faucet_account_file: &str,
         faucet_server: Option<String>,
         mnemonic_file: Option<String>,
     ) -> Result<Self> {
-        let validators_config = TrustedPeersConfig::load_config(Path::new(validator_set_file));
-        let validators = validators_config.get_trusted_consensus_peers();
+        let validators = ConsensusPeersConfig::load_config(Path::new(validator_set_file)).peers;
         ensure!(
             !validators.is_empty(),
             "Not able to load validators from trusted peers config!"
@@ -99,7 +96,12 @@ impl ClientFront {
         // If < 4 validators, all validators have to agree.
         let validator_pubkeys: HashMap<AccountAddress, Ed25519PublicKey> = validators
             .into_iter()
-            .map(|(key, value)| (key, value))
+            .map(|(peer_id_str, peer_info)| {
+                (
+                    AccountAddress::from_str(&peer_id_str).unwrap(),
+                    peer_info.consensus_pubkey,
+                )
+            })
             .collect();
         let validator_verifier = Arc::new(ValidatorVerifier::new(validator_pubkeys));
         let client = GRPCClient::new(host, ac_port, validator_verifier)?;
@@ -146,6 +148,7 @@ impl ClientFront {
             users:vec![],
         })
     }
+
 
     fn get_account_ref_id(&self, sender_account_address: &AccountAddress) -> Result<usize> {
         Ok(*self
@@ -285,10 +288,10 @@ impl ClientFront {
         let micro_num_coins = Self::convert_to_micro_libras(num_coins)?;
         match sender_account {
             Ok(sender_account) => {
-                let program = vm_genesis::encode_transfer_program(&receiver_address, micro_num_coins);
+                let program = transaction_builder::encode_transfer_script(&receiver_address, micro_num_coins);
                 let req = self.create_submit_transaction_req(
                     wallet,
-                    program,
+                    TransactionPayload::Script(program),
                     &sender_account, /* AccountData */
                     max_gas_amount, /* max_gas_amount */
                     gas_unit_price, /* gas_unit_price */
@@ -439,7 +442,6 @@ impl ClientFront {
         };
         Ok(account)
     }
-
     fn mint_coins_with_local_faucet_account(
         &mut self,
         receiver: &AccountAddress,
@@ -449,15 +451,14 @@ impl ClientFront {
         ensure!(self.faucet_account.is_some(), "No faucet account loaded");
         let sender = self.faucet_account.as_ref().unwrap();
         let sender_address = sender.address;
-        let program = vm_genesis::encode_mint_program(&receiver, num_coins);
+        let program = transaction_builder::encode_mint_script(&receiver, num_coins);
         let req = self.create_submit_transaction_req(
             &self.wallet,
-            program,
+            TransactionPayload::Script(program),
             sender,
             None, /* max_gas_amount */
             None, /* gas_unit_price */
         )?;
-
         let mut sender_mut = self.faucet_account.as_mut().unwrap();
         let resp = self.client.submit_transaction(Some(&mut sender_mut), &req);
         if is_blocking {
@@ -469,46 +470,47 @@ impl ClientFront {
         resp
     }
 
+
     fn mint_coins_with_faucet_service(
         &mut self,
         receiver: &AccountAddress,
         num_coins: u64,
         is_blocking: bool,
     ) -> Result<()> {
-        let mut runtime = Runtime::new().unwrap();
-        let client = hyper::Client::new();
 
-        let url = format!(
-            "http://{}?amount={}&address={:?}",
-            self.faucet_server, num_coins, receiver
-        )
-            .parse::<hyper::Uri>()?;
-        println!("http://{}?amount={}&address={:?}", self.faucet_server, num_coins, receiver);
-        let request = hyper::Request::post(url).body(hyper::Body::empty())?;
-        let response = runtime.block_on(client.request(request))?;
+        let client = reqwest::ClientBuilder::new().use_sys_proxy().build()?;
+
+        let url = reqwest::Url::parse_with_params(
+            format!("http://{}", self.faucet_server).as_str(),
+            &[
+                ("amount", num_coins.to_string().as_str()),
+                ("address", format!("{:?}", receiver).as_str()),
+            ],
+        )?;
+
+        let mut response = client.post(url).send()?;
         let status_code = response.status();
-        let body = response.into_body().concat2().wait()?;
-        let raw_data = std::str::from_utf8(&body)?;
-
-        if status_code != 200 {
+        let body = response.text()?;
+        if !status_code.is_success() {
             return Err(format_err!(
                 "Failed to query remote faucet server[status={}]: {:?}",
-                status_code,
-                raw_data,
+                status_code.as_str(),
+                body,
             ));
         }
-        let sequence_number = raw_data.parse::<u64>()?;
+        let sequence_number = body.parse::<u64>()?;
         if is_blocking {
             self.wait_for_transaction(association_address(), sequence_number);
         }
+
         Ok(())
     }
 
     /// Craft a transaction request.
     fn create_submit_transaction_req(
         &self,
-        wallet:&WalletLibrary,
-        program: Program,
+        wallet: &WalletLibrary,
+        program: TransactionPayload,
         sender_account: &AccountData,
         max_gas_amount: Option<u64>,
         gas_unit_price: Option<u64>,
