@@ -26,15 +26,33 @@ lazy_static! {
         path.pop();
         path.push("vm/vm_genesis/genesis/genesis.blob");
 
-        let mut f = File::open(&path).unwrap();
-        let mut bytes = vec![];
-        f.read_to_end(&mut bytes).unwrap();
-        let txn = SignedTransaction::from_proto(parse_from_bytes(&bytes).unwrap()).unwrap();
-        match txn.payload() {
-            TransactionPayload::WriteSet(ws) => ws.clone(),
-            _ => panic!("Expected writeset txn in genesis txn"),
-        }
+        load_genesis(path)
     };
+
+    pub static ref TESTNET_GENESIS: Vec<WriteSet> = {
+        let mut base_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        base_path.pop();
+        base_path.pop();
+        base_path.push("terraform/validator-sets/");
+
+        let files = std::fs::read_dir(base_path).unwrap();
+        files
+            .filter_map(std::io::Result::ok)
+            .filter(|f| f.path().ends_with("genesis.blob"))
+            .map(|f| load_genesis(f.path()))
+            .collect()
+    };
+}
+
+fn load_genesis(path: PathBuf) -> WriteSet {
+    let mut f = File::open(&path).unwrap();
+    let mut bytes = vec![];
+    f.read_to_end(&mut bytes).unwrap();
+    let txn = SignedTransaction::from_proto(parse_from_bytes(&bytes).unwrap()).unwrap();
+    match txn.payload() {
+        TransactionPayload::WriteSet(ws) => ws.clone(),
+        _ => panic!("Expected writeset txn in genesis txn"),
+    }
 }
 
 /// An in-memory implementation of [`StateView`] and [`RemoteCache`] for the VM.
@@ -108,10 +126,7 @@ impl FakeDataStore {
 impl StateView for FakeDataStore {
     fn get(&self, access_path: &AccessPath) -> Result<Option<Vec<u8>>> {
         // Since the data is in-memory, it can't fail.
-        match self.data.get(access_path) {
-            None => Ok(None),
-            Some(blob) => Ok(Some(blob.clone())),
-        }
+        Ok(self.data.get(access_path).cloned())
     }
 
     fn multi_get(&self, _access_paths: &[AccessPath]) -> Result<Vec<Option<Vec<u8>>>> {
@@ -125,10 +140,7 @@ impl StateView for FakeDataStore {
 
 // This is used by the `process_transaction` API.
 impl RemoteCache for FakeDataStore {
-    fn get(
-        &self,
-        access_path: &AccessPath,
-    ) -> ::std::result::Result<Option<Vec<u8>>, VMInvariantViolation> {
+    fn get(&self, access_path: &AccessPath) -> VMResult<Option<Vec<u8>>> {
         Ok(StateView::get(self, access_path).expect("it should not error"))
     }
 }

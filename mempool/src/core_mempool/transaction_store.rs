@@ -70,10 +70,12 @@ impl TransactionStore {
         address: &AccountAddress,
         sequence_number: u64,
     ) -> Option<SignedTransaction> {
-        if let Some(txns) = self.transactions.get(&address) {
-            if let Some(txn) = txns.get(&sequence_number) {
-                return Some(txn.txn.clone());
-            }
+        if let Some(txn) = self
+            .transactions
+            .get(&address)
+            .and_then(|txns| txns.get(&sequence_number))
+        {
+            return Some(txn.txn.clone());
         }
         None
     }
@@ -144,10 +146,12 @@ impl TransactionStore {
         if self.system_ttl_index.size() >= self.capacity {
             // try to free some space in Mempool from ParkingLot
             if let Some((address, sequence_number)) = self.parking_lot_index.pop() {
-                if let Some(txns) = self.transactions.get_mut(&address) {
-                    if let Some(txn) = txns.remove(&sequence_number) {
-                        self.index_remove(&txn);
-                    }
+                if let Some(txn) = self
+                    .transactions
+                    .get_mut(&address)
+                    .and_then(|txns| txns.remove(&sequence_number))
+                {
+                    self.index_remove(&txn);
                 }
             }
         }
@@ -242,12 +246,11 @@ impl TransactionStore {
 
     /// returns gas amount required to process all transactions for given account
     pub(crate) fn get_required_balance(&mut self, address: &AccountAddress) -> u64 {
-        match self.transactions.get_mut(&address) {
-            Some(txns) => txns.iter().fold(0, |acc, (_, txn)| {
+        self.transactions.get_mut(&address).map_or(0, |txns| {
+            txns.iter().fold(0, |acc, (_, txn)| {
                 acc + txn.txn.gas_unit_price() * txn.gas_amount
-            }),
-            None => 0,
-        }
+            })
+        })
     }
 
     /// Read `count` transactions from timeline since `timeline_id`
@@ -260,12 +263,14 @@ impl TransactionStore {
         let mut batch = vec![];
         let mut last_timeline_id = timeline_id;
         for (address, sequence_number) in self.timeline_index.read_timeline(timeline_id, count) {
-            if let Some(txns) = self.transactions.get_mut(&address) {
-                if let Some(txn) = txns.get(&sequence_number) {
-                    batch.push(txn.txn.clone());
-                    if let TimelineState::Ready(timeline_id) = txn.timeline_state {
-                        last_timeline_id = timeline_id;
-                    }
+            if let Some(txn) = self
+                .transactions
+                .get_mut(&address)
+                .and_then(|txns| txns.get(&sequence_number))
+            {
+                batch.push(txn.txn.clone());
+                if let TimelineState::Ready(timeline_id) = txn.timeline_state {
+                    last_timeline_id = timeline_id;
                 }
             }
         }

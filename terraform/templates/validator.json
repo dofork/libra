@@ -13,13 +13,14 @@
         ],
         "mountPoints": [
             {"sourceVolume": "libra-data", "containerPath": "/opt/libra/data"},
-            {"sourceVolume": "trusted-peers", "containerPath": "/opt/libra/etc/trusted_peers.config.toml"}
+            {"sourceVolume": "consensus-peers", "containerPath": "/opt/libra/etc/consensus_peers.config.toml"},
+            {"sourceVolume": "network-peers", "containerPath": "/opt/libra/etc/network_peers.config.toml"},
+            {"sourceVolume": "genesis-blob", "containerPath": "/opt/libra/etc/genesis.blob"}
         ],
         "environment": [
             {"name": "PEER_ID", "value": "${peer_id}"},
             {"name": "NODE_CONFIG", "value": ${node_config}},
             {"name": "SEED_PEERS", "value": ${seed_peers}},
-            {"name": "GENESIS_BLOB", "value": ${genesis_blob}},
             {"name": "RUST_LOG", "value": "${log_level}"}
         ],
         "linuxParameters": {
@@ -30,9 +31,7 @@
         "ulimits": [
             {"name": "nofile", "softLimit": 131072, "hardLimit": 131072}
         ],
-        "secrets": [
-            {"name": "PEER_KEYPAIRS", "valueFrom": "${secret}"}
-        ],
+%{ if log_group != "" }
         "logConfiguration": {
             "logDriver": "awslogs",
             "options": {
@@ -40,6 +39,11 @@
                 "awslogs-region": "${log_region}",
                 "awslogs-stream-prefix": "${log_prefix}"
             }
-        }
+        },
+%{ endif }
+        "secrets": [
+            {"name": "NETWORK_KEYPAIRS", "valueFrom": "${network_secret}"},
+            {"name": "CONSENSUS_KEYPAIR", "valueFrom": "${consensus_secret}"}
+        ]
     }
 ]

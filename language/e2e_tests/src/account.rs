@@ -14,12 +14,12 @@ use types::{
     byte_array::ByteArray,
     event::EventHandle,
     transaction::{
-        Program, RawTransaction, SignedTransaction, TransactionArgument, TransactionPayload,
+        RawTransaction, Script, SignedTransaction, TransactionArgument, TransactionPayload,
     },
 };
 use vm_genesis::GENESIS_KEYPAIR;
 use vm_runtime::identifier::create_access_path;
-use vm_runtime_types::value::{MutVal, Value};
+use vm_runtime_types::value::{Struct, Value};
 
 // StdLib account, it is where the code is and needed to make access path to Account resources
 lazy_static! {
@@ -136,7 +136,7 @@ impl Account {
             TransactionPayload::Program(program) => RawTransaction::new(
                 *self.address(),
                 sequence_number,
-                program,
+                TransactionPayload::Program(program),
                 max_gas_amount,
                 gas_unit_price,
                 Duration::from_secs(u64::max_value()),
@@ -180,7 +180,7 @@ impl Account {
     ) -> SignedTransaction {
         self.create_signed_txn_impl(
             *self.address(),
-            Program::new(program, vec![], args),
+            TransactionPayload::Script(Script::new(program, args)),
             sequence_number,
             max_gas_amount,
             gas_unit_price,
@@ -201,7 +201,7 @@ impl Account {
     ) -> SignedTransaction {
         self.create_signed_txn_impl(
             sender,
-            Program::new(program, vec![], args),
+            TransactionPayload::Script(Script::new(program, args)),
             sequence_number,
             max_gas_amount,
             gas_unit_price,
@@ -214,7 +214,7 @@ impl Account {
     pub fn create_signed_txn_impl(
         &self,
         sender: AccountAddress,
-        program: Program,
+        program: TransactionPayload,
         sequence_number: u64,
         max_gas_amount: u64,
         gas_unit_price: u64,
@@ -247,6 +247,7 @@ pub struct AccountData {
     account: Account,
     balance: u64,
     sequence_number: u64,
+    delegated_key_rotation_capability: bool,
     delegated_withdrawal_capability: bool,
     sent_events: EventHandle,
     received_events: EventHandle,
@@ -266,7 +267,7 @@ impl AccountData {
 
     /// Creates a new `AccountData` with the provided account.
     pub fn with_account(account: Account, balance: u64, sequence_number: u64) -> Self {
-        Self::with_account_and_event_counts(account, balance, sequence_number, 0, 0, false)
+        Self::with_account_and_event_counts(account, balance, sequence_number, 0, 0, false, false)
     }
 
     /// Creates a new `AccountData` with custom parameters.
@@ -276,12 +277,14 @@ impl AccountData {
         sequence_number: u64,
         sent_events_count: u64,
         received_events_count: u64,
+        delegated_key_rotation_capability: bool,
         delegated_withdrawal_capability: bool,
     ) -> Self {
         Self {
             account,
             balance,
             sequence_number,
+            delegated_key_rotation_capability,
             delegated_withdrawal_capability,
             sent_events: new_event_handle(sent_events_count),
             received_events: new_event_handle(received_events_count),
@@ -296,27 +299,24 @@ impl AccountData {
     /// Creates and returns a resource [`Value`] for this data.
     pub fn to_resource(&self) -> Value {
         // TODO: publish some concept of Account
-        let coin = Value::Struct(vec![MutVal::new(Value::U64(self.balance))]);
-        Value::Struct(vec![
-            MutVal::new(Value::ByteArray(ByteArray::new(
+        let coin = Value::struct_(Struct::new(vec![Value::u64(self.balance)]));
+        Value::struct_(Struct::new(vec![
+            Value::byte_array(ByteArray::new(
                 AccountAddress::from_public_key(&self.account.pubkey).to_vec(),
-            ))),
-            MutVal::new(coin),
-            MutVal::new(Value::Bool(self.delegated_withdrawal_capability)),
-            MutVal::new(Value::Struct(vec![
-                MutVal::new(Value::U64(self.received_events.count())),
-                MutVal::new(Value::ByteArray(ByteArray::new(
-                    self.received_events.key().to_vec(),
-                ))),
+            )),
+            coin,
+            Value::bool(self.delegated_key_rotation_capability),
+            Value::bool(self.delegated_withdrawal_capability),
+            Value::struct_(Struct::new(vec![
+                Value::u64(self.received_events.count()),
+                Value::byte_array(ByteArray::new(self.received_events.key().to_vec())),
             ])),
-            MutVal::new(Value::Struct(vec![
-                MutVal::new(Value::U64(self.sent_events.count())),
-                MutVal::new(Value::ByteArray(ByteArray::new(
-                    self.sent_events.key().to_vec(),
-                ))),
+            Value::struct_(Struct::new(vec![
+                Value::u64(self.sent_events.count()),
+                Value::byte_array(ByteArray::new(self.sent_events.key().to_vec())),
             ])),
-            MutVal::new(Value::U64(self.sequence_number)),
-        ])
+            Value::u64(self.sequence_number),
+        ]))
     }
 
     /// Returns the AccessPath that describes the Account resource instance.

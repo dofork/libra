@@ -8,7 +8,7 @@ use crate::{
     Executor, OP_COUNTERS,
 };
 use config::config::{NodeConfig, NodeConfigHelpers};
-use crypto::{ed25519::*, hash::GENESIS_BLOCK_ID, HashValue};
+use crypto::{hash::GENESIS_BLOCK_ID, HashValue};
 use futures::executor::block_on;
 use grpcio::{EnvBuilder, ServerBuilder};
 use proptest::prelude::*;
@@ -25,7 +25,8 @@ use storage_proto::proto::storage_grpc::create_storage;
 use storage_service::StorageService;
 use types::{
     account_address::{AccountAddress, ADDRESS_LENGTH},
-    ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
+    crypto_proxies::LedgerInfoWithSignatures,
+    ledger_info::LedgerInfo,
     transaction::{SignedTransaction, TransactionListWithProof, Version},
 };
 use vm_genesis::{encode_genesis_transaction, GENESIS_KEYPAIR};
@@ -87,12 +88,17 @@ fn execute_and_commit_block(executor: &TestExecutor, txn_index: u64) {
     };
     let id = gen_block_id(txn_index + 1);
 
-    let response = block_on(executor.execute_block(vec![txn], parent_block_id, id))
+    let state_compute_result = block_on(executor.execute_block(vec![txn], parent_block_id, id))
         .unwrap()
         .unwrap();
-    assert_eq!(response.version(), txn_index + 1);
+    assert_eq!(state_compute_result.version(), txn_index + 1);
 
-    let ledger_info = gen_ledger_info(txn_index + 1, response.root_hash(), id, txn_index + 1);
+    let ledger_info = gen_ledger_info(
+        txn_index + 1,
+        state_compute_result.root_hash(),
+        id,
+        txn_index + 1,
+    );
     block_on(executor.commit_block(ledger_info))
         .unwrap()
         .unwrap();
@@ -157,7 +163,7 @@ fn gen_ledger_info(
     root_hash: HashValue,
     commit_block_id: HashValue,
     timestamp_usecs: u64,
-) -> LedgerInfoWithSignatures<Ed25519Signature> {
+) -> LedgerInfoWithSignatures {
     let ledger_info = LedgerInfo::new(
         version,
         root_hash,
@@ -165,6 +171,7 @@ fn gen_ledger_info(
         commit_block_id,
         /* epoch_num = */ 0,
         timestamp_usecs,
+        None,
     );
     LedgerInfoWithSignatures::new(ledger_info, /* signatures = */ HashMap::new())
 }
@@ -186,8 +193,12 @@ fn test_executor_status() {
             .unwrap();
 
     assert_eq!(
-        vec![KEEP_STATUS, KEEP_STATUS, DISCARD_STATUS],
-        response.status()
+        vec![
+            KEEP_STATUS.clone(),
+            KEEP_STATUS.clone(),
+            DISCARD_STATUS.clone()
+        ],
+        *response.status()
     );
 }
 
@@ -208,7 +219,7 @@ fn test_executor_one_block() {
 
     let ledger_info = gen_ledger_info(version, execute_block_response.root_hash(), block_id, 1);
     let commit_block_future = executor.commit_block(ledger_info);
-    let _commit_block_response = block_on(commit_block_future).unwrap().unwrap();
+    block_on(commit_block_future).unwrap().unwrap();
 }
 
 #[test]
@@ -273,10 +284,7 @@ rusty_fork_test! {
 /// Generates a list of `TransactionListWithProof`s according to the given ranges.
 fn create_transaction_chunks(
     chunk_ranges: Vec<std::ops::Range<Version>>,
-) -> (
-    Vec<TransactionListWithProof>,
-    LedgerInfoWithSignatures<Ed25519Signature>,
-) {
+) -> (Vec<TransactionListWithProof>, LedgerInfoWithSignatures) {
     assert_eq!(chunk_ranges.first().unwrap().start, 1);
     for i in 1..chunk_ranges.len() {
         let previous_range = &chunk_ranges[i - 1];
@@ -490,10 +498,7 @@ fn run_transactions_naive(transactions: Vec<SignedTransaction>) -> HashValue {
     let mut iter = transactions.into_iter();
     let first_txn = iter.next();
     let response = block_on(executor.execute_block(
-        match first_txn {
-            None => vec![],
-            Some(txn) => vec![txn],
-        },
+        first_txn.map_or(vec![], |txn| vec![txn]),
         *GENESIS_BLOCK_ID,
         gen_block_id(1),
     ))

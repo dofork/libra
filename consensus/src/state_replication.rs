@@ -2,38 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::chained_bft::QuorumCert;
-use canonical_serialization::{CanonicalSerialize, CanonicalSerializer};
-use crypto::{hash::ACCUMULATOR_PLACEHOLDER_HASH, HashValue};
+use crypto::HashValue;
+use executor::StateComputeResult;
 use failure::Result;
 use futures::Future;
-use serde::{Deserialize, Serialize};
 use std::{pin::Pin, sync::Arc};
-use types::{
-    crypto_proxies::LedgerInfoWithSignatures, transaction::Version, validator_set::ValidatorSet,
-};
-
-/// A structure that specifies the result of the execution.
-/// The execution is responsible for generating the ID of the new state, which is returned in the
-/// result.
-///
-/// Not every transaction in the payload succeeds: the returned vector keeps the boolean status
-/// of success / failure of the transactions.
-/// Note that the specific details of compute_status are opaque to StateMachineReplication,
-/// which is going to simply pass the results between StateComputer and TxnManager.
-pub struct StateComputeResult {
-    /// The new state generated after the execution.
-    pub new_state_id: HashValue,
-    /// The compute status (success/failure) of the given payload. The specific details are opaque
-    /// for StateMachineReplication, which is merely passing it between StateComputer and
-    /// TxnManager.
-    pub compute_status: Vec<bool>,
-    /// Counts the number of `true` values in the `compute_status` field.
-    pub num_successful_txns: u64,
-    /// If set, these are the validator public keys that will be used to start the next epoch
-    /// immediately after this state is committed
-    /// TODO [Reconfiguration] the validators are currently ignored, no reconfiguration yet.
-    pub validators: Option<ValidatorSet>,
-}
+use types::crypto_proxies::LedgerInfoWithSignatures;
 
 /// Retrieves and updates the status of transactions on demand (e.g., via talking with Mempool)
 pub trait TxnManager: Send + Sync {
@@ -57,29 +31,6 @@ pub trait TxnManager: Send + Sync {
         // Monotonic timestamp_usecs of committed blocks is used to GC expired transactions.
         timestamp_usecs: u64,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecutedState {
-    pub state_id: HashValue,
-    pub version: Version,
-}
-
-impl ExecutedState {
-    pub fn state_for_genesis() -> Self {
-        ExecutedState {
-            state_id: *ACCUMULATOR_PLACEHOLDER_HASH,
-            version: 0,
-        }
-    }
-}
-
-impl CanonicalSerialize for ExecutedState {
-    fn serialize(&self, serializer: &mut impl CanonicalSerializer) -> Result<()> {
-        serializer.encode_bytes(self.state_id.as_ref())?;
-        serializer.encode_u64(self.version)?;
-        Ok(())
-    }
 }
 
 /// While Consensus is managing proposed blocks, `StateComputer` is managing the results of the
@@ -110,6 +61,24 @@ pub trait StateComputer: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
     fn sync_to(&self, commit: QuorumCert) -> Pin<Box<dyn Future<Output = Result<bool>> + Send>>;
+
+    fn sync_to_or_bail(&self, commit: QuorumCert) {
+        let status = futures::executor::block_on(self.sync_to(commit));
+        match status {
+            Ok(true) => (),
+            Ok(false) => panic!(
+                "state synchronizer failure, this validator will be killed as it can not \
+                 recover from this error.  After the validator is restarted, synchronization will \
+                 be retried.",
+            ),
+            Err(e) => panic!(
+                "state synchronizer failure: {:?}, this validator will be killed as it can not \
+                 recover from this error.  After the validator is restarted, synchronization will \
+                 be retried.",
+                e
+            ),
+        }
+    }
 }
 
 pub trait StateMachineReplication {

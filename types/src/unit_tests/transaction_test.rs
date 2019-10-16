@@ -3,7 +3,7 @@
 
 use crate::{
     account_address::AccountAddress,
-    transaction::{Program, RawTransaction, SignedTransaction, TransactionPayload},
+    transaction::{RawTransaction, Script, SignedTransaction, TransactionPayload},
 };
 use canonical_serialization::{
     CanonicalDeserializer, CanonicalSerializer, SimpleDeserializer, SimpleSerializer,
@@ -17,11 +17,11 @@ use std::convert::TryFrom;
 fn test_invalid_signature() {
     let keypair = compat::generate_keypair(None);
     let txn = SignedTransaction::from_proto(
-        SignedTransaction::craft_signed_transaction_for_client(
-            RawTransaction::new(
+        SignedTransaction::new(
+            RawTransaction::new_script(
                 AccountAddress::random(),
                 0,
-                Program::new(vec![], vec![], vec![]),
+                Script::new(vec![], vec![]),
                 0,
                 0,
                 std::time::Duration::new(0, 0),

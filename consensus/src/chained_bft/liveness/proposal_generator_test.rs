@@ -4,9 +4,8 @@
 use crate::{
     chained_bft::{
         block_storage::BlockReader,
-        consensus_types::vote_data::VoteData,
-        liveness::proposal_generator::{ProposalGenerationError, ProposalGenerator},
-        safety::vote_msg::VoteMsg,
+        consensus_types::{quorum_cert::QuorumCert, vote_data::VoteData, vote_msg::VoteMsg},
+        liveness::proposal_generator::ProposalGenerator,
         test_utils::{
             build_empty_tree, placeholder_ledger_info, MockTransactionManager, TreeInserter,
         },
@@ -44,10 +43,7 @@ fn test_proposal_generation_empty_tree() {
 
     // Duplicate proposals on the same round are not allowed
     let proposal_err = block_on(proposal_generator.generate_proposal(1, minute_from_now())).err();
-    assert_eq!(
-        proposal_err.unwrap(),
-        ProposalGenerationError::AlreadyProposed(1)
-    );
+    assert!(proposal_err.is_some());
 }
 
 #[test]
@@ -62,8 +58,8 @@ fn test_proposal_generation_parent() {
         true,
     );
     let genesis = block_store.root();
-    let a1 = inserter.insert_block(genesis.as_ref(), 1);
-    let b1 = inserter.insert_block(genesis.as_ref(), 2);
+    let a1 = inserter.insert_block_with_qc(QuorumCert::certificate_for_genesis(), &genesis, 1);
+    let b1 = inserter.insert_block_with_qc(QuorumCert::certificate_for_genesis(), &genesis, 2);
 
     // With no certifications the parent is genesis
     // generate proposals for an empty tree.
@@ -78,7 +74,11 @@ fn test_proposal_generation_parent() {
     let vote_msg_a1 = VoteMsg::new(
         VoteData::new(
             a1.id(),
-            block_store.get_state_for_block(a1.id()).unwrap(),
+            block_store
+                .get_compute_result(a1.id())
+                .unwrap()
+                .executed_state
+                .state_id,
             a1.round(),
             a1.quorum_cert().parent_block_id(),
             a1.quorum_cert().parent_block_round(),
@@ -101,7 +101,11 @@ fn test_proposal_generation_parent() {
     let vote_msg_b1 = VoteMsg::new(
         VoteData::new(
             b1.id(),
-            block_store.get_state_for_block(b1.id()).unwrap(),
+            block_store
+                .get_compute_result(b1.id())
+                .unwrap()
+                .executed_state
+                .state_id,
             b1.round(),
             b1.quorum_cert().parent_block_id(),
             b1.quorum_cert().parent_block_round(),
@@ -134,11 +138,15 @@ fn test_old_proposal_generation() {
         true,
     );
     let genesis = block_store.root();
-    let a1 = inserter.insert_block(genesis.as_ref(), 1);
+    let a1 = inserter.insert_block_with_qc(QuorumCert::certificate_for_genesis(), &genesis, 1);
     let vote_msg_a1 = VoteMsg::new(
         VoteData::new(
             a1.id(),
-            block_store.get_state_for_block(a1.id()).unwrap(),
+            block_store
+                .get_compute_result(a1.id())
+                .unwrap()
+                .executed_state
+                .state_id,
             a1.round(),
             a1.quorum_cert().parent_block_id(),
             a1.quorum_cert().parent_block_round(),
@@ -152,8 +160,5 @@ fn test_old_proposal_generation() {
     block_store.insert_vote_and_qc(vote_msg_a1, 1);
 
     let proposal_err = block_on(proposal_generator.generate_proposal(1, minute_from_now())).err();
-    assert_eq!(
-        proposal_err.unwrap(),
-        ProposalGenerationError::GivenRoundTooLow(1)
-    );
+    assert!(proposal_err.is_some());
 }

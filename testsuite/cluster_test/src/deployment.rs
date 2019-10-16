@@ -1,10 +1,13 @@
 use crate::{aws::Aws, cluster::Cluster};
 use failure::prelude::{bail, format_err};
+use rusoto_core::RusotoError;
 use rusoto_ecr::{
-    BatchGetImageRequest, DescribeImagesRequest, Ecr, ImageIdentifier, PutImageRequest,
+    BatchGetImageRequest, DescribeImagesRequest, Ecr, ImageIdentifier, PutImageError,
+    PutImageRequest,
 };
 use rusoto_ecs::{Ecs, UpdateServiceRequest};
-use std::{env, fs, io::ErrorKind, thread, time::Duration};
+use slog_scope::info;
+use std::{fs, io::ErrorKind, thread, time::Duration};
 
 #[derive(Clone)]
 pub struct DeploymentManager {
@@ -17,13 +20,14 @@ pub struct DeploymentManager {
 const LAST_DEPLOYED_FILE: &str = ".last_deployed_digest";
 const REPOSITORY_NAME: &str = "libra_e2e";
 pub const SOURCE_TAG: &str = "nightly";
+pub const RUNNING_TAG: &str = "cluster_test";
 pub const TESTED_TAG: &str = "nightly_tested";
 
 impl DeploymentManager {
     pub fn new(aws: Aws, cluster: Cluster) -> Self {
         let last_deployed_digest = match fs::read_to_string(LAST_DEPLOYED_FILE) {
             Ok(v) => {
-                println!("Read last deployed digest: {}", v);
+                info!("Read last deployed digest: {}", v);
                 Some(v)
             }
             Err(e) => {
@@ -46,29 +50,24 @@ impl DeploymentManager {
         let hash = self.latest_nightly_image_digest();
         if let Some(last) = &self.last_deployed_digest {
             if last == &hash {
-                println!(
-                    "Last deployed digest matches latest digest we expect, not doing redeploy"
-                );
+                info!("Last deployed digest matches latest digest we expect, not doing redeploy");
                 return None;
             }
         } else {
-            println!("Last deployed digest unknown, re-deploying anyway");
+            info!("Last deployed digest unknown, re-deploying anyway");
         }
         Some(hash)
     }
 
-    pub fn redeploy(&mut self, hash: String) -> bool {
-        if env::var("ALLOW_DEPLOY") != Ok("yes".to_string()) {
-            println!("Deploying is disabled. Run with ALLOW_DEPLOY=yes to enable deploy");
-            return false;
-        }
+    pub fn redeploy(&mut self, hash: String) -> failure::Result<()> {
+        info!("Will deploy with digest {}", hash);
+        self.tag_image(RUNNING_TAG.to_string(), hash)?;
         let _ignore = fs::remove_file(LAST_DEPLOYED_FILE);
-        println!("Will deploy with digest {}", hash);
-        self.update_all_services();
-        true
+        self.update_all_services()?;
+        Ok(())
     }
 
-    fn update_all_services(&self) {
+    pub fn update_all_services(&self) -> failure::Result<()> {
         for instance in self.cluster.instances() {
             let mut request = UpdateServiceRequest::default();
             request.cluster = Some(self.aws.workplace().clone());
@@ -83,9 +82,10 @@ impl DeploymentManager {
                 .ecs()
                 .update_service(request)
                 .sync()
-                .expect("Failed to update service");
+                .map_err(|e| format_err!("Failed to update {}: {:?}", instance, e))?;
             thread::sleep(Duration::from_millis(100));
         }
+        Ok(())
     }
 
     fn latest_nightly_image_digest(&self) -> String {
@@ -116,6 +116,13 @@ impl DeploymentManager {
     }
 
     pub fn tag_tested_image(&mut self, hash: String) -> failure::Result<()> {
+        self.tag_image(TESTED_TAG.to_string(), hash.clone())?;
+        fs::write(LAST_DEPLOYED_FILE, &hash).expect("Failed to write .last_deployed_digest");
+        self.last_deployed_digest = Some(hash);
+        Ok(())
+    }
+
+    fn tag_image(&self, tag: String, hash: String) -> failure::Result<()> {
         let mut get_request = BatchGetImageRequest::default();
         get_request.repository_name = REPOSITORY_NAME.to_string();
         get_request.image_ids = vec![ImageIdentifier {
@@ -127,7 +134,7 @@ impl DeploymentManager {
             .ecr()
             .batch_get_image(get_request)
             .sync()
-            .map_err(|e| format_err!("Failed to get nightly image: {:?}", e))?;
+            .map_err(|e| format_err!("Failed to get image {}: {:?}", hash, e))?;
         let images = response
             .images
             .expect("No images in batch_get_image response");
@@ -141,14 +148,17 @@ impl DeploymentManager {
         let mut put_request = PutImageRequest::default();
         put_request.image_manifest = manifest;
         put_request.repository_name = REPOSITORY_NAME.to_string();
-        put_request.image_tag = Some(TESTED_TAG.to_string());
-        self.aws
-            .ecr()
-            .put_image(put_request)
-            .sync()
-            .map_err(|e| format_err!("Failed to tag image: {:?}", e))?;
-        fs::write(LAST_DEPLOYED_FILE, &hash).expect("Failed to write .last_deployed_digest");
-        self.last_deployed_digest = Some(hash);
-        Ok(())
+        put_request.image_tag = Some(tag.clone());
+        let result = self.aws.ecr().put_image(put_request).sync();
+        if let Err(e) = result {
+            if let RusotoError::Service(PutImageError::ImageAlreadyExists(_)) = e {
+                info!("Tagging {} with {}: Image already exist", hash, tag);
+                Ok(())
+            } else {
+                Err(format_err!("Failed to tag image: {:?}", e))
+            }
+        } else {
+            Ok(())
+        }
     }
 }

@@ -59,20 +59,19 @@
 //! [Internal]: crate::node_type::Internal
 //! [Leaf]: crate::node_type::Leaf
 
-#![allow(clippy::unit_arg)]
-
 pub mod iterator;
 #[cfg(test)]
 mod jellyfish_merkle_test;
 #[cfg(test)]
 mod mock_tree_store;
-mod nibble;
+mod nibble_path;
 pub mod node_type;
+pub mod restore;
 mod tree_cache;
 
 use crypto::{hash::CryptoHash, HashValue};
 use failure::prelude::*;
-use nibble::{skip_common_prefix, NibbleIterator, NibblePath};
+use nibble_path::{skip_common_prefix, NibbleIterator, NibblePath};
 use node_type::{Child, Children, InternalNode, LeafNode, Node, NodeKey};
 use proptest_derive::Arbitrary;
 use std::collections::{BTreeMap, BTreeSet};
@@ -85,8 +84,23 @@ const ROOT_NIBBLE_HEIGHT: usize = HashValue::LENGTH * 2;
 /// `TreeReader` defines the interface between [`JellyfishMerkleTree`] and underlying storage
 /// holding nodes.
 pub trait TreeReader {
-    /// Get node given a node key.
-    fn get_node(&self, node_key: &NodeKey) -> Result<Node>;
+    /// Gets node given a node key. Returns error if the node does not exist.
+    fn get_node(&self, node_key: &NodeKey) -> Result<Node> {
+        self.get_node_option(node_key)?
+            .ok_or_else(|| format_err!("Missing node at {:?}.", node_key))
+    }
+
+    /// Gets node given a node key. Returns `None` if the node does not exist.
+    fn get_node_option(&self, node_key: &NodeKey) -> Result<Option<Node>>;
+
+    /// Gets the rightmost leaf. Note that this assumes we are in the process of restoring the tree
+    /// and all nodes are at the same version.
+    fn get_rightmost_leaf(&self) -> Result<Option<(NodeKey, LeafNode)>>;
+}
+
+pub trait TreeWriter {
+    /// Writes a node batch into storage.
+    fn write_node_batch(&self, node_batch: &NodeBatch) -> Result<()>;
 }
 
 /// Node batch that will be written into db atomically with other batches.
@@ -458,7 +472,7 @@ where
         );
 
         tree_cache.put_node(node_key.clone(), new_leaf_node.clone())?;
-        Ok((node_key, new_leaf_node.into()))
+        Ok((node_key, new_leaf_node))
     }
 
     /// Returns the account state blob (if applicable) and the corresponding merkle proof.
@@ -523,5 +537,12 @@ where
     #[cfg(test)]
     pub fn get(&self, key: HashValue, version: Version) -> Result<Option<AccountStateBlob>> {
         Ok(self.get_with_proof(key, version)?.0)
+    }
+
+    #[cfg(test)]
+    pub fn get_root_hash(&self, version: Version) -> Result<HashValue> {
+        let root_node_key = NodeKey::new_empty_path(version);
+        let root_node = self.reader.get_node(&root_node_key)?;
+        Ok(root_node.hash())
     }
 }

@@ -5,6 +5,7 @@ authors = ["Libra Association <opensource@libra.org>"]
 license = "Apache-2.0"
 edition = "2018"
 
+# common dependencies
 [dependencies]
 byteorder = { version = "1.3.2", default-features = false }
 canonical_serialization = { path = "../../common/canonical_serialization" }
@@ -22,9 +23,11 @@ structopt = { version = "0.2.18", default-features = false }
 types = { path = "../../types" }
 vm = { path = "../../language/vm" }
 vm_runtime_types = { path = "../../language/vm/vm_runtime/vm_runtime_types" }
+consensus = { path = "../../consensus" }
+admission_control_service = { path = "../../admission_control/admission_control_service" }
 
 [dev-dependencies]
-datatest = "0.4.2"
+datatest-stable = { path = "../../common/datatest-stable" }
 stats_alloc = "0.1.8"
 rusty-fork = "0.2.2"
 
@@ -33,5 +36,10 @@ vm = { path = "../../language/vm", features = ["testing"] }
 vm_runtime_types = { path = "../../language/vm/vm_runtime/vm_runtime_types", features = ["testing"] }
 
 [features]
-default = ["testing"]
+default = ["testing", "fuzzing"]
 testing = ["types/testing", "vm/testing", "vm_runtime_types/testing"]
+fuzzing = ["consensus/fuzzing", "admission_control_service/fuzzing"]
+
+[[test]]
+name = "artifacts"
+harness = false

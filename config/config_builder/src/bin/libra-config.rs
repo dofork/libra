@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::{value_t, App, Arg};
-use config_builder::swarm_config::{LibraSwarmTopology, SwarmConfigBuilder};
+use config::config::RoleType;
+use config_builder::swarm_config::SwarmConfigBuilder;
 use std::convert::TryInto;
 
 const BASE_ARG: &str = "base";
@@ -11,6 +12,8 @@ const OUTPUT_DIR_ARG: &str = "output-dir";
 const DISCOVERY_ARG: &str = "discovery";
 const KEY_SEED_ARG: &str = "key-seed";
 const FAUCET_ACCOUNT_FILE_ARG: &str = "faucet_account_file";
+const ROLE_ARG: &str = "role";
+const UPSTREAM_CONFIG_DIR_ARG: &str = "upstream_config_dir";
 
 fn main() {
     let args = App::new("Libra Config Tool")
@@ -60,6 +63,21 @@ fn main() {
                 .help("File location from which to load faucet account generated via generate_keypair tool")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name(ROLE_ARG)
+            .short("r")
+            .long(ROLE_ARG)
+            .help("Role for the nodes: one of {\"validator\", \"full_node\"}")
+            .default_value("validator")
+            .takes_value(true),
+        )
+        .arg(
+            Arg::with_name(UPSTREAM_CONFIG_DIR_ARG)
+            .short("u")
+            .long(UPSTREAM_CONFIG_DIR_ARG)
+            .help("Config directory for upstream node. This field is needed if role is \"full_node\"")
+            .takes_value(true),
+        )
         .get_matches();
     let base_path = value_t!(args, BASE_ARG, String).expect("Missing path to base config.");
     let nodes_count = value_t!(args, NODES_ARG, usize).expect("Missing node count.");
@@ -73,14 +91,19 @@ fn main() {
         .expect("Must provide faucet account file path");
     let (faucet_account_keypair, _faucet_key_file_path, _temp_dir) =
         generate_keypair::load_faucet_key_or_create_default(Some(faucet_account_file_path));
+    let role: RoleType = value_t!(args, ROLE_ARG, String)
+        .expect("Missing role type")
+        .into();
 
-    let topology = LibraSwarmTopology::create_validator_network(nodes_count);
     let mut config_builder = SwarmConfigBuilder::new();
     config_builder
-        .with_topology(topology)
+        .with_num_nodes(nodes_count)
+        .with_role(role)
         .with_base(base_path)
         .with_output_dir(output_dir)
-        .with_faucet_keypair(faucet_account_keypair);
+        .with_faucet_keypair(faucet_account_keypair)
+        .with_upstream_config_dir(value_t!(args, UPSTREAM_CONFIG_DIR_ARG, String).ok());
+
     if args.is_present(DISCOVERY_ARG) {
         config_builder.force_discovery();
     }
@@ -93,26 +116,5 @@ fn main() {
                 .expect("Seed should be 32 bytes long."),
         );
     }
-    let generated_configs = config_builder.build().expect("Unable to generate configs");
-
-    println!(
-        "Trusted Peers Config: {:?}",
-        generated_configs.get_trusted_peers_config().0
-    );
-
-    println!(
-        "Seed Peers Config: {:?}",
-        generated_configs.get_seed_peers_config().0
-    );
-
-    for (path, node_config) in generated_configs.get_configs() {
-        println!(
-            "Node Config for PeerId({}): {:?}",
-            node_config.network.peer_id, path
-        );
-        println!(
-            "Node Keys for PeerId({}): {:?}",
-            node_config.network.peer_id, node_config.network.peer_keypairs_file
-        );
-    }
+    config_builder.build().expect("Unable to generate configs");
 }

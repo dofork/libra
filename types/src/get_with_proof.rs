@@ -1,8 +1,6 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(clippy::unit_arg)]
-
 use crate::{
     access_path::AccessPath,
     account_address::AccountAddress,
@@ -295,7 +293,8 @@ fn verify_get_events_by_access_path_resp(
             ledger_info.version(),
             req_access_path.address,
         )?;
-        let event_handle = account_resource.get_event_handle_by_query_path(&req_access_path)?;
+        let event_handle =
+            account_resource.get_event_handle_by_query_path(&req_access_path.path)?;
         (event_handle.count(), event_handle.key())
     };
 

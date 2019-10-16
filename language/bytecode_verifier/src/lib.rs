@@ -10,6 +10,7 @@ pub mod acquires_list_verifier;
 pub mod check_duplication;
 pub mod code_unit_verifier;
 pub mod control_flow_graph;
+pub mod instantiation_loops;
 pub mod nonce;
 pub mod partition;
 pub mod resources;
@@ -17,8 +18,8 @@ pub mod signature;
 pub mod stack_usage_verifier;
 pub mod struct_defs;
 pub mod type_memory_safety;
-#[cfg(test)]
-mod unit_tests;
+pub mod unused_entries;
+
 pub mod verifier;
 
 pub use check_duplication::DuplicationChecker;
@@ -27,6 +28,7 @@ pub use resources::ResourceTransitiveChecker;
 pub use signature::SignatureChecker;
 pub use stack_usage_verifier::StackUsageVerifier;
 pub use struct_defs::RecursiveStructDefChecker;
+pub use unused_entries::UnusedEntryChecker;
 pub use verifier::{
     verify_main_signature, verify_module_dependencies, verify_script_dependencies, VerifiedModule,
     VerifiedScript,

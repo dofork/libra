@@ -1,6 +1,7 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod accumulator;
 pub mod position;
 #[cfg(any(test, feature = "testing"))]
 pub mod proptest_proof;
@@ -14,6 +15,7 @@ use crate::{
     account_state_blob::AccountStateBlob,
     contract_event::ContractEvent,
     ledger_info::LedgerInfo,
+    proof::definition::MAX_ACCUMULATOR_PROOF_DEPTH,
     transaction::{TransactionInfo, TransactionListWithProof, Version},
 };
 use crypto::{
@@ -318,8 +320,9 @@ fn verify_accumulator_element<H: Clone + CryptoHasher>(
 ) -> Result<()> {
     let siblings = accumulator_proof.siblings();
     ensure!(
-        siblings.len() <= 63,
-        "Accumulator proof has more than 63 ({}) siblings.",
+        siblings.len() <= MAX_ACCUMULATOR_PROOF_DEPTH,
+        "Accumulator proof has more than {} ({}) siblings.",
+        MAX_ACCUMULATOR_PROOF_DEPTH,
         siblings.len()
     );
 

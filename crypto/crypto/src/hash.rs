@@ -68,11 +68,10 @@
 //! }
 //! ```
 
-#![allow(clippy::unit_arg)]
-
 use bytes::Bytes;
 use failure::prelude::*;
 use lazy_static::lazy_static;
+use nibble::Nibble;
 use proptest_derive::Arbitrary;
 use proto_conv::{FromProto, IntoProto};
 use rand::{rngs::EntropyRng, Rng};
@@ -98,7 +97,9 @@ impl HashValue {
     /// The length of the hash in bytes.
     pub const LENGTH: usize = 32;
     /// The length of the hash in bits.
-    pub const LENGTH_IN_BITS: usize = HashValue::LENGTH * 8;
+    pub const LENGTH_IN_BITS: usize = Self::LENGTH * 8;
+    /// The length of the hash in nibbles.
+    pub const LENGTH_IN_NIBBLES: usize = Self::LENGTH * 2;
 
     /// Create a new [`HashValue`] from a byte array.
     pub fn new(hash: [u8; HashValue::LENGTH]) -> Self {
@@ -149,8 +150,9 @@ impl HashValue {
         HashValue { hash }
     }
 
-    // Intentionally not public.
-    fn from_sha3(buffer: &[u8]) -> Self {
+    /// Convenience function to compute a sha3-256 HashValue of the buffer. It will handle hasher
+    /// creation, data feeding and finalization.
+    pub fn from_sha3_256(buffer: &[u8]) -> Self {
         let mut sha3 = Keccak::new_sha3_256();
         sha3.update(buffer);
         HashValue::from_keccak(sha3)
@@ -189,6 +191,20 @@ impl HashValue {
             .zip(other.iter_bits())
             .take_while(|(x, y)| x == y)
             .count()
+    }
+
+    /// Returns the length of common prefix of `self` and `other` in nibbles.
+    pub fn common_prefix_nibbles_len(&self, other: HashValue) -> usize {
+        self.common_prefix_bits_len(other) / 4
+    }
+
+    /// Returns the `index`-th nibble.
+    pub fn get_nibble(&self, index: usize) -> Nibble {
+        Nibble::from(if index % 2 == 0 {
+            self[index / 2] >> 4
+        } else {
+            self[index / 2] & 0x0F
+        })
     }
 
     /// Returns first SHORT_STRING_LENGTH bytes as String in hex
@@ -304,7 +320,7 @@ impl<'a> std::iter::Iterator for HashValueBitIterator<'a> {
     type Item = bool;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.pos.next().and_then(|x| Some(self.get_bit(x)))
+        self.pos.next().map(|x| self.get_bit(x))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -314,7 +330,7 @@ impl<'a> std::iter::Iterator for HashValueBitIterator<'a> {
 
 impl<'a> std::iter::DoubleEndedIterator for HashValueBitIterator<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.pos.next_back().and_then(|x| Some(self.get_bit(x)))
+        self.pos.next_back().map(|x| self.get_bit(x))
     }
 }
 
@@ -387,7 +403,7 @@ impl DefaultHasher {
         if !typename.is_empty() {
             let mut salt = typename.to_vec();
             salt.extend_from_slice(LIBRA_HASH_SUFFIX);
-            state.update(HashValue::from_sha3(&salt[..]).as_ref());
+            state.update(HashValue::from_sha3_256(&salt[..]).as_ref());
         }
         DefaultHasher { state }
     }

@@ -7,10 +7,9 @@ use admission_control_proto::proto::admission_control_grpc::{
 use admission_control_service::admission_control_service::AdmissionControlService;
 use config::config::{NetworkConfig, NodeConfig, RoleType};
 use consensus::consensus_provider::{make_consensus_provider, ConsensusProvider};
-use crypto::ed25519::*;
+use crypto::{ed25519::*, ValidKey};
 use debug_interface::{node_debug_service::NodeDebugService, proto::node_debug_interface_grpc};
-use execution_proto::proto::execution_grpc;
-use execution_service::ExecutionService;
+use executor::Executor;
 use futures::future::{FutureExt, TryFutureExt};
 use grpc_helpers::ServerHandle;
 use grpcio::{ChannelBuilder, EnvBuilder, ServerBuilder};
@@ -30,6 +29,7 @@ use state_synchronizer::StateSynchronizer;
 use std::{
     cmp::min,
     convert::{TryFrom, TryInto},
+    str::FromStr,
     sync::Arc,
     thread,
     time::Instant,
@@ -38,15 +38,15 @@ use storage_client::{StorageRead, StorageReadServiceClient, StorageWriteServiceC
 use storage_service::start_storage_service;
 use tokio::runtime::{Builder, Runtime};
 use types::account_address::AccountAddress as PeerId;
+use vm_runtime::MoveVM;
 use vm_validator::vm_validator::VMValidator;
 
 pub struct LibraHandle {
     _ac: ServerHandle,
     _mempool: Option<MempoolRuntime>,
     _state_synchronizer: StateSynchronizer,
-    _network: Runtime,
+    _network_runtimes: Vec<Runtime>,
     consensus: Option<Box<dyn ConsensusProvider>>,
-    _execution: ServerHandle,
     _storage: ServerHandle,
     _debug: ServerHandle,
 }
@@ -68,16 +68,15 @@ fn setup_ac(config: &NodeConfig) -> (::grpcio::Server, AdmissionControlClient) {
     );
     let port = config.admission_control.admission_control_service_port;
 
-    // Create mempool client
-    let mempool_client = match (&config.network.role).into() {
-        RoleType::FullNode => None,
-        RoleType::Validator => {
-            let connection_str = format!("localhost:{}", config.mempool.mempool_service_port);
-            let env2 = Arc::new(EnvBuilder::new().name_prefix("grpc-ac-mem-").build());
-            Some(Arc::new(MempoolClient::new(
-                ChannelBuilder::new(env2).connect(&connection_str),
-            )))
-        }
+    // Create mempool client if the node is validator.
+    let connection_str = format!("localhost:{}", config.mempool.mempool_service_port);
+    let env2 = Arc::new(EnvBuilder::new().name_prefix("grpc-ac-mem-").build());
+    let mempool_client = if config.is_validator() {
+        Some(Arc::new(MempoolClient::new(
+            ChannelBuilder::new(env2).connect(&connection_str),
+        )))
+    } else {
+        None
     };
 
     // Create storage read client
@@ -109,7 +108,7 @@ fn setup_ac(config: &NodeConfig) -> (::grpcio::Server, AdmissionControlClient) {
     (server, client)
 }
 
-fn setup_executor(config: &NodeConfig) -> ::grpcio::Server {
+fn setup_executor(config: &NodeConfig) -> Arc<Executor<MoveVM>> {
     let client_env = Arc::new(EnvBuilder::new().name_prefix("grpc-exe-sto-").build());
     let storage_read_client = Arc::new(StorageReadServiceClient::new(
         Arc::clone(&client_env),
@@ -123,13 +122,11 @@ fn setup_executor(config: &NodeConfig) -> ::grpcio::Server {
         config.storage.grpc_max_receive_len,
     ));
 
-    let handle = ExecutionService::new(storage_read_client, storage_write_client, config);
-    let service = execution_grpc::create_execution(handle);
-    ::grpcio::ServerBuilder::new(Arc::new(EnvBuilder::new().name_prefix("grpc-exe-").build()))
-        .register_service(service)
-        .bind(config.execution.address.clone(), config.execution.port)
-        .build()
-        .expect("Unable to create grpc server")
+    Arc::new(Executor::new(
+        Arc::clone(&storage_read_client) as Arc<dyn StorageRead>,
+        storage_write_client,
+        config,
+    ))
 }
 
 fn setup_debug_interface(config: &NodeConfig) -> ::grpcio::Server {
@@ -147,6 +144,7 @@ fn setup_debug_interface(config: &NodeConfig) -> ::grpcio::Server {
         .expect("Unable to create grpc server")
 }
 
+// TODO(abhayb): Move to network crate (similar to consensus).
 pub fn setup_network(
     peer_id: PeerId,
     config: &mut NetworkConfig,
@@ -156,60 +154,83 @@ pub fn setup_network(
         .build()
         .expect("Failed to start runtime. Won't be able to start networking.");
     let role: RoleType = (&config.role).into();
-    let trusted_peers = config
-        .trusted_peers
-        .get_trusted_network_peers()
-        .clone()
-        .into_iter()
-        .map(|(peer_id, (signing_public_key, identity_public_key))| {
-            (
-                peer_id,
-                NetworkPublicKeys {
-                    signing_public_key,
-                    identity_public_key,
-                },
-            )
-        })
-        .collect();
-    let seed_peers = config
-        .seed_peers
-        .seed_peers
-        .clone()
-        .into_iter()
-        .map(|(peer_id, addrs)| (peer_id.try_into().expect("Invalid PeerId"), addrs))
-        .collect();
-    let network_signing_private = config.peer_keypairs.take_network_signing_private()
-        .expect("Failed to move network signing private key out of NodeConfig, key not set or moved already");
-    let network_signing_public: Ed25519PublicKey = (&network_signing_private).into();
-    let listen_addr = config.listen_address.clone();
-    let advertised_addr = config.advertised_address.clone();
-    let mut network_builder = NetworkBuilder::new(runtime.executor(), peer_id, listen_addr, role);
-    if config.enable_encryption_and_authentication {
-        network_builder
-            .transport(TransportType::TcpNoise)
-            .identity_keys(config.peer_keypairs.get_network_identity_keypair());
-    } else {
-        network_builder.transport(TransportType::Tcp);
-    };
-    let (_listen_addr, network_provider) = network_builder
-        .advertised_address(advertised_addr)
-        .seed_peers(seed_peers)
-        .trusted_peers(trusted_peers)
-        .signing_keys((network_signing_private, network_signing_public))
-        .discovery_interval_ms(config.discovery_interval_ms)
-        .connectivity_check_interval_ms(config.connectivity_check_interval_ms)
+    let mut network_builder = NetworkBuilder::new(
+        runtime.executor(),
+        peer_id,
+        config.listen_address.clone(),
+        role,
+    );
+    network_builder
+        .permissioned(config.is_permissioned)
+        .advertised_address(config.advertised_address.clone())
         .direct_send_protocols(vec![
             ProtocolId::from_static(CONSENSUS_DIRECT_SEND_PROTOCOL),
             ProtocolId::from_static(MEMPOOL_DIRECT_SEND_PROTOCOL),
             ProtocolId::from_static(STATE_SYNCHRONIZER_MSG_PROTOCOL),
         ])
-        .rpc_protocols(vec![ProtocolId::from_static(CONSENSUS_RPC_PROTOCOL)])
-        .build();
+        .rpc_protocols(vec![ProtocolId::from_static(CONSENSUS_RPC_PROTOCOL)]);
+    if config.is_permissioned {
+        // If the node wants to run in permissioned mode, it should also have authentication and
+        // encryption.
+        assert!(
+            config.enable_encryption_and_authentication,
+            "Permissioned network end-points should use authentication"
+        );
+        let trusted_peers = config
+            .network_peers
+            .peers
+            .iter()
+            .map(|(peer_id, keys)| {
+                (
+                    PeerId::from_str(peer_id).unwrap(),
+                    NetworkPublicKeys {
+                        signing_public_key: keys.network_signing_pubkey.clone(),
+                        identity_public_key: keys.network_identity_pubkey.clone(),
+                    },
+                )
+            })
+            .collect();
+        let seed_peers = config
+            .seed_peers
+            .seed_peers
+            .clone()
+            .into_iter()
+            .map(|(peer_id, addrs)| (peer_id.try_into().expect("Invalid PeerId"), addrs))
+            .collect();
+        let network_signing_private = config.network_keypairs.take_network_signing_private()
+            .expect("Failed to move network signing private key out of NodeConfig, key not set or moved already");
+        let network_signing_public: Ed25519PublicKey = (&network_signing_private).into();
+        network_builder
+            .transport(TransportType::TcpNoise(Some(
+                config.network_keypairs.get_network_identity_keypair(),
+            )))
+            .connectivity_check_interval_ms(config.connectivity_check_interval_ms)
+            .seed_peers(seed_peers)
+            .trusted_peers(trusted_peers)
+            .signing_keys((network_signing_private, network_signing_public))
+            .discovery_interval_ms(config.discovery_interval_ms);
+    } else if config.enable_encryption_and_authentication {
+        // Even if a network end-point is permissionless, it might want to prove its identity to
+        // another peer it connects to. For this, we use TCP + Noise but in a permission-less way.
+        network_builder.transport(TransportType::PermissionlessTcpNoise(Some(
+            config.network_keypairs.get_network_identity_keypair(),
+        )));
+    } else {
+        network_builder.transport(TransportType::Tcp);
+    }
+    let (_listen_addr, network_provider) = network_builder.build();
     (runtime, network_provider)
 }
 
 pub fn setup_environment(node_config: &mut NodeConfig) -> (AdmissionControlClient, LibraHandle) {
     crash_handler::setup_panic_handler();
+
+    // Some of our code uses the rayon global thread pool. Name the rayon threads so it doesn't
+    // cause confusion, otherwise the threads would have their parent's name.
+    rayon::ThreadPoolBuilder::new()
+        .thread_name(|index| format!("rayon-global-{}", index))
+        .build_global()
+        .expect("Building rayon global thread pool should work.");
 
     let mut instant = Instant::now();
     let storage = start_storage_service(&node_config);
@@ -219,83 +240,40 @@ pub fn setup_environment(node_config: &mut NodeConfig) -> (AdmissionControlClien
     );
 
     instant = Instant::now();
-    let execution = ServerHandle::setup(setup_executor(&node_config));
-    debug!(
-        "Execution service started in {} ms",
-        instant.elapsed().as_millis()
-    );
+    let executor = setup_executor(&node_config);
+    debug!("Executor setup in {} ms", instant.elapsed().as_millis());
+    let mut network_runtimes = vec![];
+    let mut state_sync_network_handles = vec![];
+    let mut validator_network_provider = None;
 
-    instant = Instant::now();
-    let (ac_server, ac_client) = setup_ac(&node_config);
-    let ac = ServerHandle::setup(ac_server);
-    debug!("AC started in {} ms", instant.elapsed().as_millis());
-
-    instant = Instant::now();
-    let peer_id = PeerId::try_from(node_config.network.peer_id.clone()).expect("Invalid PeerId");
-    let (runtime, mut network_provider) = setup_network(peer_id, &mut node_config.network);
-    debug!("Network started in {} ms", instant.elapsed().as_millis());
-
-    let (state_sync_network_sender, state_sync_network_events) = network_provider
-        .add_state_synchronizer(vec![ProtocolId::from_static(
-            STATE_SYNCHRONIZER_MSG_PROTOCOL,
-        )]);
-
-    let state_synchronizer = StateSynchronizer::bootstrap(
-        vec![(state_sync_network_sender, state_sync_network_events)],
-        &node_config,
-        vec![], // TODO: pass in empty vector for now, will be derived from node config later
-    );
-
-    let mut mempool = None;
-    let mut consensus = None;
-    if let RoleType::Validator = (&node_config.network.role).into() {
-        // Initialize and start mempool.
-        instant = Instant::now();
-        let (mempool_network_sender, mempool_network_events) = network_provider
-            .add_mempool(vec![ProtocolId::from_static(MEMPOOL_DIRECT_SEND_PROTOCOL)]);
-        mempool = Some(MempoolRuntime::bootstrap(
-            &node_config,
-            mempool_network_sender,
-            mempool_network_events,
-        ));
-        debug!("Mempool started in {} ms", instant.elapsed().as_millis());
-
-        // Start the network provider.
-        // Note: We need to start network provider before consensus, because the consensus
-        // initialization is blocked on state synchronizer to sync to the initial root ledger info,
-        // which in turn cannot make progress before network initialization because the NewPeer
-        // events which state synchronizer uses to know its peers are delivered by network provider.
-        // If we were to start network provider after consensus, we create a cyclic dependency from
-        // network provider -> consensus -> state synchronizer -> network provier. This deadlock was
-        // observed in GitHub Issue #749. A long term fix might be make consensus initialization
-        // async instead of blocking on state synchronizer.
-        let (consensus_network_sender, consensus_network_events) =
-            network_provider.add_consensus(vec![
-                ProtocolId::from_static(CONSENSUS_RPC_PROTOCOL),
-                ProtocolId::from_static(CONSENSUS_DIRECT_SEND_PROTOCOL),
-            ]);
-        runtime
-            .executor()
-            .spawn(network_provider.start().unit_error().compat());
-
-        // Initialize and start consensus.
-        instant = Instant::now();
-        let mut consensus_provider = make_consensus_provider(
-            node_config,
-            consensus_network_sender,
-            consensus_network_events,
-            state_synchronizer.create_client(),
-        );
-        consensus_provider
-            .start()
-            .expect("Failed to start consensus. Can't proceed.");
-        consensus = Some(consensus_provider);
-        debug!("Consensus started in {} ms", instant.elapsed().as_millis());
-    } else {
-        // Start the network provider.
-        runtime
-            .executor()
-            .spawn(network_provider.start().unit_error().compat());
+    for mut network in &mut node_config.networks {
+        let peer_id = PeerId::try_from(network.peer_id.clone()).expect("Invalid PeerId");
+        let (runtime, mut network_provider) = setup_network(peer_id, &mut network);
+        state_sync_network_handles.push(network_provider.add_state_synchronizer(vec![
+            ProtocolId::from_static(STATE_SYNCHRONIZER_MSG_PROTOCOL),
+        ]));
+        if let RoleType::Validator = (&network.role).into() {
+            validator_network_provider = Some((peer_id, runtime, network_provider));
+        } else {
+            // For non-validator roles, the peer_id should be derived from the network identity
+            // key.
+            assert_eq!(
+                peer_id,
+                PeerId::try_from(
+                    network
+                        .network_keypairs
+                        .get_network_identity_public()
+                        .to_bytes()
+                )
+                .unwrap()
+            );
+            // Start the network provider.
+            runtime
+                .executor()
+                .spawn(network_provider.start().unit_error().compat());
+            network_runtimes.push(runtime);
+            debug!("Network started for peer_id: {}", peer_id);
+        }
     }
 
     let debug_if = ServerHandle::setup(setup_debug_interface(&node_config));
@@ -304,13 +282,73 @@ pub fn setup_environment(node_config: &mut NodeConfig) -> (AdmissionControlClien
     let metric_host = node_config.debug_interface.address.clone();
     thread::spawn(move || metric_server::start_server((metric_host.as_str(), metrics_port)));
 
+    let state_synchronizer = StateSynchronizer::bootstrap(
+        state_sync_network_handles,
+        Arc::clone(&executor),
+        &node_config,
+    );
+    let mut mempool = None;
+    let mut consensus = None;
+    if let Some((peer_id, runtime, mut network_provider)) = validator_network_provider {
+        // Note: We need to start network provider before consensus, because the consensus
+        // initialization is blocked on state synchronizer to sync to the initial root ledger
+        // info, which in turn cannot make progress before network initialization
+        // because the NewPeer events which state synchronizer uses to know its
+        // peers are delivered by network provider. If we were to start network
+        // provider after consensus, we create a cyclic dependency from
+        // network provider -> consensus -> state synchronizer -> network provider. This deadlock
+        // was observed in GitHub Issue #749. A long term fix might be make
+        // consensus initialization async instead of blocking on state synchronizer.
+        let (mempool_network_sender, mempool_network_events) = network_provider
+            .add_mempool(vec![ProtocolId::from_static(MEMPOOL_DIRECT_SEND_PROTOCOL)]);
+        let (consensus_network_sender, consensus_network_events) =
+            network_provider.add_consensus(vec![
+                ProtocolId::from_static(CONSENSUS_RPC_PROTOCOL),
+                ProtocolId::from_static(CONSENSUS_DIRECT_SEND_PROTOCOL),
+            ]);
+        runtime
+            .executor()
+            .spawn(network_provider.start().unit_error().compat());
+        network_runtimes.push(runtime);
+        debug!("Network started for peer_id: {}", peer_id);
+
+        // Initialize and start mempool.
+        instant = Instant::now();
+        mempool = Some(MempoolRuntime::bootstrap(
+            &node_config,
+            mempool_network_sender,
+            mempool_network_events,
+        ));
+        debug!("Mempool started in {} ms", instant.elapsed().as_millis());
+
+        // Initialize and start consensus.
+        instant = Instant::now();
+        let mut consensus_provider = make_consensus_provider(
+            node_config,
+            consensus_network_sender,
+            consensus_network_events,
+            executor,
+            state_synchronizer.create_client(),
+        );
+        consensus_provider
+            .start()
+            .expect("Failed to start consensus. Can't proceed.");
+        consensus = Some(consensus_provider);
+        debug!("Consensus started in {} ms", instant.elapsed().as_millis());
+    }
+
+    // Initialize and start AC.
+    instant = Instant::now();
+    let (ac_server, ac_client) = setup_ac(&node_config);
+    let ac = ServerHandle::setup(ac_server);
+    debug!("AC started in {} ms", instant.elapsed().as_millis());
+
     let libra_handle = LibraHandle {
+        _network_runtimes: network_runtimes,
         _ac: ac,
         _mempool: mempool,
         _state_synchronizer: state_synchronizer,
-        _network: runtime,
         consensus,
-        _execution: execution,
         _storage: storage,
         _debug: debug_if,
     };

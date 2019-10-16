@@ -11,9 +11,6 @@
 //! For examples of property-based tests written against this model, see the
 //! `tests/account_universe` directory.
 
-// clippy warns on the Arbitrary impl for `AccountPairGen` -- it's how Arbitrary works so ignore it.
-#![allow(clippy::unit_arg)]
-
 mod create_account;
 mod peer_to_peer;
 mod rotate_key;
@@ -30,10 +27,10 @@ use crate::{
 use crypto::ed25519::{Ed25519PrivateKey, Ed25519PublicKey};
 use lazy_static::lazy_static;
 use proptest::{prelude::*, strategy::Union};
-use std::fmt;
+use std::{fmt, sync::Arc};
 use types::{
     transaction::{SignedTransaction, TransactionStatus},
-    vm_error::{ExecutionStatus, VMStatus, VMValidationStatus},
+    vm_error::{StatusCode, VMStatus},
 };
 
 lazy_static! {
@@ -85,16 +82,16 @@ pub trait AUTransactionGen: fmt::Debug {
     /// necessary. Returns a signed transaction that can be run on the VM and the expected output.
     fn apply(&self, universe: &mut AccountUniverse) -> (SignedTransaction, TransactionStatus);
 
-    /// Creates a boxed version of this transaction, suitable for dynamic dispatch.
-    fn boxed(self) -> Box<dyn AUTransactionGen>
+    /// Creates an arced version of this transaction, suitable for dynamic dispatch.
+    fn arced(self) -> Arc<dyn AUTransactionGen>
     where
         Self: 'static + Sized,
     {
-        Box::new(self)
+        Arc::new(self)
     }
 }
 
-impl AUTransactionGen for Box<dyn AUTransactionGen> {
+impl AUTransactionGen for Arc<dyn AUTransactionGen> {
     fn apply(&self, universe: &mut AccountUniverse) -> (SignedTransaction, TransactionStatus) {
         (**self).apply(universe)
     }
@@ -187,7 +184,7 @@ pub fn txn_one_account_result(
             sender.sent_events_count += 1;
             sender.balance -= to_deduct;
             (
-                TransactionStatus::Keep(VMStatus::Execution(ExecutionStatus::Executed)),
+                TransactionStatus::Keep(VMStatus::new(StatusCode::EXECUTED)),
                 true,
             )
         }
@@ -198,7 +195,7 @@ pub fn txn_one_account_result(
             sender.sequence_number += 1;
             sender.balance -= gas_cost;
             (
-                TransactionStatus::Keep(VMStatus::Execution(ExecutionStatus::Aborted(6))),
+                TransactionStatus::Keep(VMStatus::new(StatusCode::ABORTED).with_sub_status(6)),
                 false,
             )
         }
@@ -209,15 +206,15 @@ pub fn txn_one_account_result(
             sender.sequence_number += 1;
             sender.balance -= low_gas_cost;
             (
-                TransactionStatus::Keep(VMStatus::Execution(ExecutionStatus::Aborted(10))),
+                TransactionStatus::Keep(VMStatus::new(StatusCode::ABORTED).with_sub_status(10)),
                 false,
             )
         }
         (false, _, _) => {
             // Not enough gas to pass validation. Nothing will happen.
             (
-                TransactionStatus::Discard(VMStatus::Validation(
-                    VMValidationStatus::InsufficientBalanceForTransactionFee,
+                TransactionStatus::Discard(VMStatus::new(
+                    StatusCode::INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE,
                 )),
                 false,
             )

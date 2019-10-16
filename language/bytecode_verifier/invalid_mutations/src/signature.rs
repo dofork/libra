@@ -6,9 +6,10 @@ use proptest::{
     sample::{select, Index as PropIndex},
 };
 use proptest_helpers::{pick_slice_idxs, RepeatVec};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, iter};
+use types::vm_error::{StatusCode, VMStatus};
 use vm::{
-    errors::{VMStaticViolation, VerificationError},
+    errors::append_err_info,
     file_format::{CompiledModuleMut, SignatureToken},
     internals::ModuleIndex,
     IndexKind, SignatureTokenKind,
@@ -47,7 +48,7 @@ impl<'a> ApplySignatureDoubleRefContext<'a> {
         Self { module, mutations }
     }
 
-    pub fn apply(self) -> Vec<VerificationError> {
+    pub fn apply(self) -> Vec<VMStatus> {
         // Apply double refs before field refs -- XXX is this correct?
         let sig_indexes = self.all_sig_indexes();
         let picked = sig_indexes.pick_uniform(&self.mutations);
@@ -82,15 +83,38 @@ impl<'a> ApplySignatureDoubleRefContext<'a> {
             };
 
             *token = double_ref.kind.wrap(token.clone());
-            errs.push(VerificationError {
+            let msg = format!(
+                "At index {} with kind {} with token {:#?}, with outer kind {} and inner kind {}",
+                error_idx,
                 kind,
-                idx: error_idx,
-                err: VMStaticViolation::InvalidSignatureToken(
-                    token.clone(),
-                    double_ref.kind.outer,
-                    double_ref.kind.inner,
-                ),
-            });
+                token.clone(),
+                double_ref.kind.outer,
+                double_ref.kind.inner
+            );
+            // If a locals signature is used by more than one functions and contains an error, it
+            // should be reported multiple times. The following code emulates this behavior to match
+            // the new implementation of the signature checker.
+            // TODO: Revisit this and see if it's still required once we rework prop tests.
+            match sig_idx {
+                SignatureIndex::Locals(idx) => {
+                    let n_references = self
+                        .module
+                        .function_defs
+                        .iter()
+                        .filter(|def| !def.is_native() && def.code.locals.0 as usize == *idx)
+                        .count();
+                    errs.extend(
+                        iter::repeat_with(|| {
+                            VMStatus::new(StatusCode::INVALID_SIGNATURE_TOKEN)
+                                .with_message(msg.clone())
+                        })
+                        .take(n_references),
+                    );
+                }
+                _ => {
+                    errs.push(VMStatus::new(StatusCode::INVALID_SIGNATURE_TOKEN).with_message(msg));
+                }
+            }
         }
 
         errs
@@ -144,7 +168,7 @@ impl<'a> ApplySignatureFieldRefContext<'a> {
     }
 
     #[inline]
-    pub fn apply(self) -> Vec<VerificationError> {
+    pub fn apply(self) -> Vec<VMStatus> {
         // One field definition might be associated with more than one signature, so collect all
         // the interesting ones in a map of type_sig_idx => field_def_idx.
         let mut interesting_idxs = BTreeMap::new();
@@ -176,16 +200,15 @@ impl<'a> ApplySignatureFieldRefContext<'a> {
 
             *token = new_token;
 
-            let violation = VMStaticViolation::InvalidFieldDefReference(token.clone(), token_kind);
-            errs.extend(
-                field_def_idxs
-                    .iter()
-                    .map(|field_def_idx| VerificationError {
-                        kind: IndexKind::FieldDefinition,
-                        idx: *field_def_idx,
-                        err: violation.clone(),
-                    }),
-            );
+            let msg = format!("with token {:#?} of kind {}", token.clone(), token_kind);
+            let violation = VMStatus::new(StatusCode::INVALID_FIELD_DEF).with_message(msg);
+            errs.extend(field_def_idxs.iter().map(|field_def_idx| {
+                append_err_info(
+                    violation.clone(),
+                    IndexKind::FieldDefinition,
+                    *field_def_idx,
+                )
+            }));
         }
 
         errs

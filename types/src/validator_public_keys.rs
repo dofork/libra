@@ -1,8 +1,6 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(clippy::unit_arg)]
-
 use crate::{
     account_address::AccountAddress,
     proto::validator_public_keys::ValidatorPublicKeys as ProtoValidatorPublicKeys,
@@ -15,14 +13,15 @@ use failure::Result;
 #[cfg(any(test, feature = "testing"))]
 use proptest_derive::Arbitrary;
 use proto_conv::{FromProto, IntoProto};
-use std::convert::TryFrom;
+use serde::{Deserialize, Serialize};
+use std::{convert::TryFrom, fmt};
 
 /// After executing a special transaction that sets the validators that should be used for the
 /// next epoch, consensus and networking get the new list of validators.  Consensus will have a
 /// public key to validate signed messages and networking will have a TBD public key for
 /// creating secure channels of communication between validators.  The validators and their
 /// public keys may or may not change between epochs.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "testing"), derive(Arbitrary))]
 pub struct ValidatorPublicKeys {
     // Hash value of the current public key of the account address
@@ -34,6 +33,12 @@ pub struct ValidatorPublicKeys {
     // This key establishes the corresponding PrivateKey holder's eligibility to join the p2p
     // network
     network_identity_public_key: X25519StaticPublicKey,
+}
+
+impl fmt::Display for ValidatorPublicKeys {
+    fn fmt(&self, f: &mut fmt::Formatter) -> std::fmt::Result {
+        write!(f, "account_address: {}", self.account_address.short_str())
+    }
 }
 
 impl ValidatorPublicKeys {

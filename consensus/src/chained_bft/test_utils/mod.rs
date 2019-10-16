@@ -1,16 +1,18 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    chained_bft::{
-        block_storage::BlockStore,
-        common::Round,
-        consensus_types::{block::Block, quorum_cert::QuorumCert, vote_data::VoteData},
+use crate::chained_bft::{
+    block_storage::BlockStore,
+    common::Round,
+    consensus_types::{
+        block::{Block, ExecutedBlock},
+        quorum_cert::QuorumCert,
+        vote_data::VoteData,
     },
-    state_replication::ExecutedState,
 };
 use crypto::{hash::CryptoHash, HashValue};
-use futures::{channel::mpsc, executor::block_on};
+use executor::ExecutedState;
+use futures::executor::block_on;
 use logger::{set_simple_logger, set_simple_logger_prefix};
 use std::{collections::HashMap, sync::Arc};
 use termion::color::*;
@@ -24,7 +26,7 @@ mod mock_state_computer;
 mod mock_storage;
 mod mock_txn_manager;
 
-pub use mock_state_computer::MockStateComputer;
+pub use mock_state_computer::{EmptyStateComputer, MockStateComputer};
 pub use mock_storage::{EmptyStorage, MockStorage};
 pub use mock_txn_manager::MockTransactionManager;
 
@@ -38,13 +40,12 @@ pub fn build_empty_tree() -> Arc<BlockStore<Vec<usize>>> {
 pub fn build_empty_tree_with_custom_signing(
     my_signer: ValidatorSigner,
 ) -> Arc<BlockStore<Vec<usize>>> {
-    let (commit_cb_sender, _commit_cb_receiver) = mpsc::unbounded::<LedgerInfoWithSignatures>();
     let (storage, initial_data) = EmptyStorage::start_for_testing();
     Arc::new(block_on(BlockStore::new(
         storage,
         initial_data,
         my_signer,
-        Arc::new(MockStateComputer::new(commit_cb_sender)),
+        Arc::new(EmptyStateComputer),
         true,
         10, // max pruned blocks in mem
     )))
@@ -68,9 +69,9 @@ impl TreeInserter {
     /// `insert_block_with_qc`.
     pub fn insert_block(
         &mut self,
-        parent: &Block<Vec<usize>>,
+        parent: &ExecutedBlock<Vec<usize>>,
         round: Round,
-    ) -> Arc<Block<Vec<usize>>> {
+    ) -> Arc<ExecutedBlock<Vec<usize>>> {
         // Node must carry a QC to its parent
         let parent_qc = placeholder_certificate_for_block(
             vec![self.block_store.signer()],
@@ -88,12 +89,12 @@ impl TreeInserter {
     pub fn insert_block_with_qc(
         &mut self,
         parent_qc: QuorumCert,
-        parent: &Block<Vec<usize>>,
+        parent: &ExecutedBlock<Vec<usize>>,
         round: Round,
-    ) -> Arc<Block<Vec<usize>>> {
+    ) -> Arc<ExecutedBlock<Vec<usize>>> {
         self.payload_val += 1;
         block_on(self.block_store.insert_block_with_qc(Block::make_block(
-            parent,
+            parent.block(),
             vec![self.payload_val],
             round,
             parent.timestamp_usecs() + 1,
@@ -108,7 +109,7 @@ impl TreeInserter {
         block: Block<Vec<usize>>,
         block_signer: &ValidatorSigner,
         qc_signers: Vec<&ValidatorSigner>,
-    ) -> Arc<Block<Vec<usize>>> {
+    ) -> Arc<ExecutedBlock<Vec<usize>>> {
         self.payload_val += 1;
         let new_round = if block.round() > 0 {
             block.round() - 1
@@ -116,15 +117,19 @@ impl TreeInserter {
             0
         };
 
-        let parent_qc = placeholder_certificate_for_block(
-            qc_signers,
-            block.parent_id(),
-            new_round,
-            block.quorum_cert().parent_block_id(),
-            block.quorum_cert().parent_block_round(),
-            block.quorum_cert().grandparent_block_id(),
-            block.quorum_cert().grandparent_block_round(),
-        );
+        let parent_qc = if new_round == 0 {
+            QuorumCert::certificate_for_genesis()
+        } else {
+            placeholder_certificate_for_block(
+                qc_signers,
+                block.parent_id(),
+                new_round,
+                block.quorum_cert().parent_block_id(),
+                block.quorum_cert().parent_block_round(),
+                block.quorum_cert().grandparent_block_id(),
+                block.quorum_cert().grandparent_block_round(),
+            )
+        };
 
         let new_block = Block::new_internal(
             block.get_payload().clone(),
@@ -147,6 +152,7 @@ pub fn placeholder_ledger_info() -> LedgerInfo {
         HashValue::zero(),
         0,
         0,
+        None,
     )
 }
 
@@ -163,7 +169,7 @@ pub fn placeholder_certificate_for_block(
     let certified_block_state = ExecutedState::state_for_genesis();
     let consensus_data_hash = VoteData::vote_digest(
         certified_block_id,
-        certified_block_state,
+        certified_block_state.state_id,
         certified_block_round,
         certified_parent_block_id,
         certified_parent_block_round,
@@ -181,13 +187,13 @@ pub fn placeholder_certificate_for_block(
         let li_sig = signer
             .sign_message(ledger_info_placeholder.hash())
             .expect("Failed to sign LedgerInfo");
-        signatures.insert(signer.author(), li_sig.into());
+        signatures.insert(signer.author(), li_sig);
     }
 
     QuorumCert::new(
         VoteData::new(
             certified_block_id,
-            certified_block_state,
+            certified_block_state.state_id,
             certified_block_round,
             certified_parent_block_id,
             certified_parent_block_round,

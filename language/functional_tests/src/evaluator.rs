@@ -15,19 +15,16 @@ use ir_to_bytecode::{
 };
 use ir_to_bytecode_syntax::ast::ScriptOrModule;
 use language_e2e_tests::{account::AccountData, executor::FakeExecutor};
-use std::{str::FromStr, time::Duration};
+use std::{env, fmt, str::FromStr, time::Duration};
 use stdlib::stdlib_modules;
 use types::{
     transaction::{
         Module as TransactionModule, RawTransaction, Script as TransactionScript,
         SignedTransaction, TransactionArgument, TransactionOutput, TransactionStatus,
     },
-    vm_error::{ExecutionStatus, VMStatus},
+    vm_error::StatusCode,
 };
-use vm::{
-    errors::VerificationStatus,
-    file_format::{CompiledModule, CompiledScript},
-};
+use vm::file_format::{CompiledModule, CompiledScript};
 
 /// A transaction to be evaluated by the testing infra.
 /// Contains code and a transaction config.
@@ -70,12 +67,25 @@ pub enum Status {
     Failure,
 }
 
+#[derive(Debug, Clone)]
+pub enum OutputType {
+    CompiledModule(CompiledModule),
+    CompiledScript(CompiledScript),
+    Ast(ScriptOrModule),
+}
+
+impl OutputType {
+    pub fn to_check_string(&self) -> String {
+        format!("{:?}", self)
+    }
+}
+
 /// An entry in the `EvaluationResult`.
 #[derive(Debug)]
 pub enum EvaluationOutput {
     Transaction,
     Stage(Stage),
-    Output(String),
+    Output(Box<OutputType>),
     Error(String),
 }
 
@@ -85,6 +95,7 @@ pub enum EvaluationOutput {
 pub struct EvaluationResult {
     pub outputs: Vec<EvaluationOutput>,
     pub status: Status,
+    pub use_debug_output: bool,
 }
 
 impl EvaluationResult {
@@ -110,28 +121,48 @@ impl EvaluationResult {
     }
 }
 
+impl fmt::Display for OutputType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use OutputType::*;
+        match self {
+            CompiledModule(cm) => write!(f, "{:#?}", cm),
+            CompiledScript(cs) => write!(f, "{:#?}", cs),
+            Ast(ast) => write!(f, "{}", ast),
+        }
+    }
+}
+
+impl fmt::Display for EvaluationOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use EvaluationOutput::*;
+        match self {
+            Transaction => write!(f, "Transaction"),
+            Stage(stage) => write!(f, "Stage: {:?}", stage),
+            Output(output) => write!(f, "{}", output),
+            Error(string) => write!(f, "Error: {}", string),
+        }
+    }
+}
+
+impl fmt::Display for EvaluationResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "---------------------Outputs----------------")?;
+        for (i, output) in self.outputs.iter().enumerate() {
+            writeln!(f, "[{}] {}", i, output)?;
+        }
+        write!(f, "-----------Status---------------\n{:?}", self.status)
+    }
+}
+
 /// Verifies a script & its dependencies.
 fn do_verify_script(script: CompiledScript, deps: &[VerifiedModule]) -> Result<VerifiedScript> {
     let verified_script = match VerifiedScript::new(script) {
         Ok(verified_script) => verified_script,
-        Err((_, errs)) => {
-            return Err(ErrorKind::VerificationFailure(
-                errs.into_iter()
-                    .map(VerificationStatus::Script)
-                    .collect::<Vec<_>>(),
-            )
-            .into())
-        }
+        Err((_, errs)) => return Err(ErrorKind::VerificationFailure(errs).into()),
     };
     let errs = verify_script_dependencies(&verified_script, deps);
     if !errs.is_empty() {
-        return Err(ErrorKind::VerificationFailure(
-            errs.into_iter()
-                // TODO: should this be VerificationStatus::Dependency?
-                .map(VerificationStatus::Script)
-                .collect::<Vec<_>>(),
-        )
-        .into());
+        return Err(ErrorKind::VerificationFailure(errs).into());
     }
     Ok(verified_script)
 }
@@ -140,24 +171,11 @@ fn do_verify_script(script: CompiledScript, deps: &[VerifiedModule]) -> Result<V
 fn do_verify_module(module: CompiledModule, deps: &[VerifiedModule]) -> Result<VerifiedModule> {
     let verified_module = match VerifiedModule::new(module) {
         Ok(verified_module) => verified_module,
-        Err((_, errs)) => {
-            return Err(ErrorKind::VerificationFailure(
-                errs.into_iter()
-                    .map(VerificationStatus::Script)
-                    .collect::<Vec<_>>(),
-            )
-            .into())
-        }
+        Err((_, errs)) => return Err(ErrorKind::VerificationFailure(errs).into()),
     };
     let errs = verify_module_dependencies(&verified_module, deps);
     if !errs.is_empty() {
-        return Err(ErrorKind::VerificationFailure(
-            errs.into_iter()
-                // TODO: should this be VerificationStatus::Dependency?
-                .map(VerificationStatus::Script)
-                .collect::<Vec<_>>(),
-        )
-        .into());
+        return Err(ErrorKind::VerificationFailure(errs).into());
     }
     Ok(verified_module)
 }
@@ -220,7 +238,9 @@ fn run_transaction(
     if outputs.len() == 1 {
         let output = outputs.pop().unwrap();
         match output.status() {
-            TransactionStatus::Keep(VMStatus::Execution(ExecutionStatus::Executed)) => Ok(output),
+            TransactionStatus::Keep(status) if status.major_status == StatusCode::EXECUTED => {
+                Ok(output)
+            }
             TransactionStatus::Keep(_) => Err(ErrorKind::VMExecutionFailure(output).into()),
             TransactionStatus::Discard(_) => Err(ErrorKind::DiscardedTransaction(output).into()),
         }
@@ -267,8 +287,13 @@ macro_rules! unwrap_or_log {
         match $res {
             Ok(r) => r,
             Err(e) => {
-                $log.outputs
-                    .push(EvaluationOutput::Error(format!("{:?}", e)));
+                if $log.use_debug_output {
+                    $log.outputs
+                        .push(EvaluationOutput::Error(format!("{:?}", e)));
+                } else {
+                    $log.outputs
+                        .push(EvaluationOutput::Error(format!("{:#?}", e)));
+                }
                 return Ok($log);
             }
         }
@@ -281,6 +306,7 @@ pub fn eval(config: &GlobalConfig, transactions: &[Transaction]) -> Result<Evalu
     let mut res = EvaluationResult {
         outputs: vec![],
         status: Status::Failure,
+        use_debug_output: env::args().any(|elem| elem == "debug_output"),
     };
 
     // set up a fake executor with the genesis block and create the accounts
@@ -309,10 +335,10 @@ pub fn eval(config: &GlobalConfig, transactions: &[Transaction]) -> Result<Evalu
         res.outputs.push(EvaluationOutput::Stage(Stage::Parser));
         let parsed_script_or_module =
             unwrap_or_log!(parse_script_or_module(&transaction.input), res);
-        res.outputs.push(EvaluationOutput::Output(format!(
-            "{:?}",
-            parsed_script_or_module
-        )));
+        res.outputs
+            .push(EvaluationOutput::Output(Box::new(OutputType::Ast(
+                parsed_script_or_module.clone(),
+            ))));
 
         match parsed_script_or_module {
             ScriptOrModule::Script(parsed_script) => {
@@ -323,9 +349,10 @@ pub fn eval(config: &GlobalConfig, transactions: &[Transaction]) -> Result<Evalu
                 res.outputs.push(EvaluationOutput::Stage(Stage::Compiler));
 
                 let compiled_script =
-                    unwrap_or_log!(compile_script(addr, &parsed_script, &deps), res);
-                res.outputs
-                    .push(EvaluationOutput::Output(format!("{:?}", compiled_script)));
+                    unwrap_or_log!(compile_script(*addr, parsed_script, &deps), res);
+                res.outputs.push(EvaluationOutput::Output(Box::new(
+                    OutputType::CompiledScript(compiled_script.clone()),
+                )));
 
                 // stage 3: verify the script
                 if transaction.config.is_stage_disabled(Stage::Verifier) {
@@ -364,9 +391,10 @@ pub fn eval(config: &GlobalConfig, transactions: &[Transaction]) -> Result<Evalu
                 res.outputs.push(EvaluationOutput::Stage(Stage::Compiler));
 
                 let compiled_module =
-                    unwrap_or_log!(compile_module(addr, &parsed_module, &deps), res);
-                res.outputs
-                    .push(EvaluationOutput::Output(format!("{:?}", compiled_module)));
+                    unwrap_or_log!(compile_module(*addr, parsed_module, &deps), res);
+                res.outputs.push(EvaluationOutput::Output(Box::new(
+                    OutputType::CompiledModule(compiled_module.clone()),
+                )));
 
                 // module is added to the list of dependencies despite it passes the verifier or
                 // not

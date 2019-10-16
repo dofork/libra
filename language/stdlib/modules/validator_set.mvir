@@ -1,76 +1,133 @@
 module ValidatorSet {
+    import 0x0.LibraAccount;
+    import 0x0.Vector;
+
+    struct ValidatorInfo {
+        addr: address,
+        network_signing_pubkey: bytearray,
+        network_identity_pubkey: bytearray,
+        consensus_pubkey: bytearray,
+        // TODO: voting power
+    }
+
+    // A current or prospective validator should publish one of these under their address
+    resource ValidatorConfig {
+        network_signing_pubkey: bytearray,
+        network_identity_pubkey: bytearray,
+        consensus_pubkey: bytearray,
+    }
+
     resource T {
-        // size of the validator set. Currently serialization format will enforce the lexicographic ordering by field
-        // name, thus we need to carefully choose the name for the deserialization order from the validator side.
-        // Validators need to interpret it and use the first `array_size` fields as the keys and ignore the rest.
-        // TODO: Replace this with generic array once Move supports generic collections.
-        array_size: u64,
-        // Pubkey list. Since we don't have array for now, use hard coded fields instead.
-        key0: Self.ValidatorPublicKeys,
-        key1: Self.ValidatorPublicKeys,
-        key2: Self.ValidatorPublicKeys,
-        key3: Self.ValidatorPublicKeys,
-        key4: Self.ValidatorPublicKeys,
-        key5: Self.ValidatorPublicKeys,
-        key6: Self.ValidatorPublicKeys,
-        key7: Self.ValidatorPublicKeys,
-        key8: Self.ValidatorPublicKeys,
-        key9: Self.ValidatorPublicKeys,
+        validators: Vector.T<Self.ValidatorInfo>,
     }
 
-    struct ValidatorPublicKeys {
-        account_address: address,
-        consensus_public_key: bytearray,
-        network_identity_public_key: bytearray,
-        network_signing_public_key: bytearray,
-    }
+    // This can only be invoked by the special validator set address, and only a single time.
+    // Currently, it is invoked in the genesis transaction.
+    public initialize() {
+        // Only callable by the validator set address
+        assert(get_txn_sender() == 0x1D8, 1);
 
-    publish_validator_set(
-        size: u64,
-        key0: Self.ValidatorPublicKeys,
-        key1: Self.ValidatorPublicKeys,
-        key2: Self.ValidatorPublicKeys,
-        key3: Self.ValidatorPublicKeys,
-        key4: Self.ValidatorPublicKeys,
-        key5: Self.ValidatorPublicKeys,
-        key6: Self.ValidatorPublicKeys,
-        key7: Self.ValidatorPublicKeys,
-        key8: Self.ValidatorPublicKeys,
-        key9: Self.ValidatorPublicKeys
-    ) {
-        let set: Self.T;
-        // We only support at most 10 validator keys for now. Will get rid of of that
-        assert(copy(size) <= 10, 42);
-        set = T {
-            array_size: move(size),
-            key0: move(key0),
-            key1: move(key1),
-            key2: move(key2),
-            key3: move(key3),
-            key4: move(key4),
-            key5: move(key5),
-            key6: move(key6),
-            key7: move(key7),
-            key8: move(key8),
-            key9: move(key9),
-        };
-        move_to_sender<T>(move(set));
+        move_to_sender<T>(T { validators: Vector.empty<Self.ValidatorInfo>() });
+
         return;
     }
 
-    make_new_validator_key(
-        account_address: address,
-        consensus_public_key: bytearray,
-        network_signing_public_key: bytearray,
-        network_identity_public_key: bytearray
-    ): Self.ValidatorPublicKeys {
-        let key: Self.ValidatorPublicKeys;
-        key = ValidatorPublicKeys {
-            account_address: move(account_address),
-            consensus_public_key: move(consensus_public_key),
-            network_signing_public_key: move(network_signing_public_key),
-            network_identity_public_key: move(network_identity_public_key),
-        };
-        return move(key);
+    // Return the size of the current validator set
+    public size(): u64 acquires T {
+        let validator_set_ref: &Self.T;
+
+        validator_set_ref = borrow_global<T>(0x1D8);
+        return Vector.length<Self.ValidatorInfo>(&move(validator_set_ref).validators);
     }
+
+    // Return true if addr is a current validator
+    public is_validator(addr: address): bool acquires T {
+        let size: u64;
+        let i: u64;
+        let vector_ref: &Vector.T<Self.ValidatorInfo>;
+        let info_ref: &Self.ValidatorInfo;
+
+        vector_ref = &borrow_global<T>(0x1D8).validators;
+        size = Vector.length<Self.ValidatorInfo>(copy(vector_ref));
+        if (copy(size) == 0) {
+            return false;
+        }
+
+        i = 0;
+        info_ref = Vector.borrow<Self.ValidatorInfo>(copy(vector_ref), copy(i));
+        while (copy(i) < copy(size)) {
+            if (*&copy(info_ref).addr == copy(addr)) {
+            // TODO: below doesn't work, looks like a compiler bug
+            //if (*(&Vector.borrow<Self.ValidatorInfo>(copy(vector_ref), copy(i)).addr) == copy(addr)) {
+                return true;
+            }
+            info_ref = Vector.borrow<Self.ValidatorInfo>(copy(vector_ref), copy(i));
+            i = copy(i) + 1;
+        }
+
+        return false;
+    }
+
+    // Register the transaction sender as a candidate validator by creating a ValidatorConfig
+    // resource under their account
+    public register_candidate_validator(
+        network_signing_pubkey: bytearray,
+        network_identity_pubkey: bytearray,
+        consensus_pubkey: bytearray) {
+
+        move_to_sender<ValidatorConfig>(
+            ValidatorConfig {
+                network_signing_pubkey: move(network_signing_pubkey),
+                network_identity_pubkey: move(network_identity_pubkey),
+                consensus_pubkey: move(consensus_pubkey),
+            });
+
+        return;
+    }
+
+    // Get the consensus public key for the validator candidate at the given address
+    public get_consensus_pubkey(addr: address): bytearray acquires ValidatorConfig {
+        let config_ref: &Self.ValidatorConfig;
+
+        config_ref = borrow_global<ValidatorConfig>(move(addr));
+        return *&move(config_ref).consensus_pubkey;
+    }
+
+    // Rotate a validator candidate's consensus public key. The change will not take effect until
+    // the next reconfiguration.
+    public rotate_consensus_pubkey(consensus_pubkey: bytearray) acquires ValidatorConfig {
+        let config_ref: &mut Self.ValidatorConfig;
+
+        config_ref = borrow_global_mut<ValidatorConfig>(get_txn_sender());
+        *(&mut move(config_ref).consensus_pubkey) = move(consensus_pubkey);
+
+        return;
+    }
+
+    // TODO: Decide on access control policy. For now, we ensure that this is only callable from the
+    // genesis txn. Obviously, we'll need a different policy once we support reconfiguration.
+    add_validator(account_address: address) acquires T, ValidatorConfig {
+        let config_ref: &Self.ValidatorConfig;
+        let validator_set_ref: &mut Self.T;
+        let vector_ref: &mut Vector.T<Self.ValidatorInfo>;
+
+        // A prospective validator must have an account
+        assert(LibraAccount.exists(copy(account_address)), 17);
+
+        config_ref = borrow_global<ValidatorConfig>(copy(account_address));
+        // TODO: check for LIT, compute voting power based on LIT + stake
+        validator_set_ref = borrow_global_mut<T>(0x1D8);
+        Vector.push_back<Self.ValidatorInfo>(
+            &mut move(validator_set_ref).validators,
+            ValidatorInfo {
+                addr: move(account_address),
+                network_signing_pubkey: *&copy(config_ref).network_signing_pubkey,
+                network_identity_pubkey: *&copy(config_ref).network_identity_pubkey,
+                consensus_pubkey: *&move(config_ref).consensus_pubkey,
+            }
+        );
+
+        return;
+    }
+
 }

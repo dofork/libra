@@ -59,7 +59,7 @@ async fn send_ping_expect_pong(substream: MemorySocket) {
     let mut substream = Framed::new(substream.compat(), UviBytes::<Bytes>::default()).sink_compat();
     // Send ping.
     substream
-        .send(Bytes::from(Ping::new().write_to_bytes().unwrap()))
+        .send(Ping::default().to_bytes().unwrap())
         .await
         .unwrap();
     // Expect Pong.
@@ -73,7 +73,7 @@ async fn expect_ping_send_ok(substream: MemorySocket) {
     let _: Ping = read_proto(&mut substream).await.unwrap();
     // Send Pong.
     substream
-        .send(Bytes::from(Pong::new().write_to_bytes().unwrap()))
+        .send(Pong::default().to_bytes().unwrap())
         .await
         .unwrap();
 }

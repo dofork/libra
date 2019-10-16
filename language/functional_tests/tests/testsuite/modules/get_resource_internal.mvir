@@ -1,4 +1,4 @@
-// check: no struct definition referencing in scripts
+// check: Missing struct definition for T
 
 module Token {
     resource T { }
@@ -16,7 +16,7 @@ main() {
     let yes: &mut Token.T;
 
     sender = get_txn_sender();
-    yes = borrow_global<T>(copy(sender));
+    yes = borrow_global_mut<T>(copy(sender));
     _ = move(yes);
     return;
 }

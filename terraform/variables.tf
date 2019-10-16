@@ -75,6 +75,23 @@ variable "validator_linux_capabilities" {
   default     = []
 }
 
+variable "validator_node_sources_ipv4" {
+  type        = list(string)
+  description = "List of IPv4 CIDR blocks from which to allow Validator Node access"
+  default     = []
+}
+
+variable "validator_node_sources_ipv6" {
+  type        = list(string)
+  description = "List of IPv6 CIDR blocks from which to allow Validator Node access"
+  default     = []
+}
+
+variable "validator_use_public_ip" {
+  type    = bool
+  default = false
+}
+
 variable "append_workspace_dns" {
   description = "Append Terraform workspace to DNS names created"
   default     = true
@@ -88,4 +105,9 @@ variable "prometheus_pagerduty_key" {
 variable "monitoring_snapshot" {
   default     = ""
   description = "EBS snapshot ID to initialise monitoring data with"
+}
+
+variable "cloudwatch_logs" {
+  description = "Send container logs to CloudWatch"
+  default     = false
 }

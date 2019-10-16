@@ -57,7 +57,7 @@
 //! ```
 
 use crate::{hkdf::Hkdf, traits::*};
-use crypto_derive::{SilentDebug, SilentDisplay};
+use crypto_derive::{Deref, SilentDebug, SilentDisplay};
 use rand::{rngs::EntropyRng, RngCore};
 use serde::{de, export, ser};
 use sha2::Sha256;
@@ -85,7 +85,7 @@ pub struct X25519EphemeralPrivateKey(x25519_dalek::EphemeralSecret);
 pub struct X25519StaticPrivateKey(x25519_dalek::StaticSecret);
 
 /// An x25519 public key
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deref)]
 pub struct X25519PublicKey(x25519_dalek::PublicKey);
 
 /// An x25519 public key to match the X25519Static key type, which
@@ -242,14 +242,6 @@ impl<'a> From<&'a X25519StaticPrivateKey> for X25519StaticPublicKey {
     }
 }
 
-impl Deref for X25519StaticPublicKey {
-    type Target = X25519PublicKey;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
 impl std::hash::Hash for X25519PublicKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         let encoded_pubkey = self.0.as_bytes();
@@ -334,10 +326,7 @@ impl<'de> de::Visitor<'de> for X25519StaticPrivateKeyVisitor {
     where
         E: de::Error,
     {
-        match X25519StaticPrivateKey::try_from(value) {
-            Ok(key) => Ok(key),
-            Err(error) => Err(E::custom(error)),
-        }
+        X25519StaticPrivateKey::try_from(value).map_err(E::custom)
     }
 }
 
@@ -352,10 +341,7 @@ impl<'de> de::Visitor<'de> for X25519StaticPublicKeyVisitor {
     where
         E: de::Error,
     {
-        match X25519StaticPublicKey::try_from(value) {
-            Ok(key) => Ok(key),
-            Err(error) => Err(E::custom(error)),
-        }
+        X25519StaticPublicKey::try_from(value).map_err(E::custom)
     }
 }
 

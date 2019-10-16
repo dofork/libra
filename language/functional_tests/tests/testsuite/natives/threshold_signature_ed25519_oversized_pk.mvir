@@ -27,4 +27,5 @@ main() {
     return;
 }
 
-// check: Aborted(248665377)
+// check: NATIVE_FUNCTION_ERROR
+// check: 248665377

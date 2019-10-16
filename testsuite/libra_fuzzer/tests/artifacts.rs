@@ -3,9 +3,6 @@
 
 //! Test artifacts: examples known to have crashed in the past.
 
-#![feature(custom_test_frameworks)]
-#![test_runner(datatest::runner)]
-
 use libra_fuzzer::FuzzTarget;
 use rusty_fork::{fork, rusty_fork_id};
 use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
@@ -17,11 +14,9 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 /// The memory limit for each deserializer, in bytes.
 const MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 
-#[datatest::files("artifacts", {
-    artifact_path in r"^.*/.*"
-})]
-#[test]
-fn test_artifact(artifact_path: &Path) {
+datatest_stable::harness!(test_artifact, "artifacts", r"^.*/.*");
+
+fn test_artifact(artifact_path: &Path) -> datatest_stable::Result<()> {
     let test_name = test_name(artifact_path);
 
     if no_fork() {
@@ -43,14 +38,12 @@ fn test_artifact(artifact_path: &Path) {
         )
         .expect("forking test failed");
     }
+
+    Ok(())
 }
 
 fn no_fork() -> bool {
-    match env::var_os("NO_FORK") {
-        Some(x) => x == "1",
-        // Fork by default.
-        None => false,
-    }
+    env::var_os("NO_FORK").map_or(false, |x| x == "1")
 }
 
 fn test_artifact_impl(artifact_path: &Path) {

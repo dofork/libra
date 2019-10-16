@@ -1,18 +1,12 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    chained_bft::{
-        common::Round, consensus_types::vote_data::VoteData,
-        safety::vote_msg::VoteMsgVerificationError,
-    },
-    state_replication::ExecutedState,
-};
+use crate::chained_bft::{common::Round, consensus_types::vote_data::VoteData};
 use crypto::{
     hash::{CryptoHash, ACCUMULATOR_PLACEHOLDER_HASH, GENESIS_BLOCK_ID},
     HashValue,
 };
-use failure::Result;
+use failure::{Result, ResultExt};
 use network::proto::QuorumCert as ProtoQuorumCert;
 use proto_conv::{FromProto, IntoProto};
 use serde::{Deserialize, Serialize};
@@ -37,7 +31,7 @@ impl Display for QuorumCert {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         write!(
             f,
-            "QuorumCert: [Vote data: {}, {}]",
+            "QuorumCert: [{}, {}]",
             self.vote_data, self.signed_ledger_info
         )
     }
@@ -55,8 +49,8 @@ impl QuorumCert {
         self.vote_data.block_id()
     }
 
-    pub fn certified_state(&self) -> ExecutedState {
-        self.vote_data.executed_state()
+    pub fn certified_state_id(&self) -> HashValue {
+        self.vote_data.executed_state_id()
     }
 
     pub fn certified_block_round(&self) -> Round {
@@ -99,7 +93,7 @@ impl QuorumCert {
     pub fn certificate_for_genesis() -> QuorumCert {
         let genesis_digest = VoteData::vote_digest(
             *GENESIS_BLOCK_ID,
-            ExecutedState::state_for_genesis(),
+            *ACCUMULATOR_PLACEHOLDER_HASH,
             0,
             *GENESIS_BLOCK_ID,
             0,
@@ -114,6 +108,7 @@ impl QuorumCert {
             *GENESIS_BLOCK_ID,
             0,
             0,
+            None,
         );
         let signature = signer
             .sign_message(li.hash())
@@ -123,7 +118,7 @@ impl QuorumCert {
         QuorumCert::new(
             VoteData::new(
                 *GENESIS_BLOCK_ID,
-                ExecutedState::state_for_genesis(),
+                *ACCUMULATOR_PLACEHOLDER_HASH,
                 0,
                 *GENESIS_BLOCK_ID,
                 0,
@@ -134,24 +129,23 @@ impl QuorumCert {
         )
     }
 
-    pub fn verify(
-        &self,
-        validator: &ValidatorVerifier,
-    ) -> ::std::result::Result<(), VoteMsgVerificationError> {
+    pub fn verify(&self, validator: &ValidatorVerifier) -> failure::Result<()> {
         let vote_hash = self.vote_data.hash();
-        if self.ledger_info().ledger_info().consensus_data_hash() != vote_hash {
-            return Err(VoteMsgVerificationError::ConsensusDataMismatch);
-        }
+        ensure!(
+            self.ledger_info().ledger_info().consensus_data_hash() == vote_hash,
+            "Quorum Cert's hash mismatch LedgerInfo"
+        );
         // Genesis is implicitly agreed upon, it doesn't have real signatures.
         if self.vote_data.block_round() == 0
             && self.vote_data.block_id() == *GENESIS_BLOCK_ID
-            && self.vote_data.executed_state() == ExecutedState::state_for_genesis()
+            && self.vote_data.executed_state_id() == *ACCUMULATOR_PLACEHOLDER_HASH
         {
             return Ok(());
         }
         self.ledger_info()
             .verify(validator)
-            .map_err(VoteMsgVerificationError::SigVerifyError)
+            .with_context(|e| format!("Fail to verify QuorumCert: {:?}", e))?;
+        Ok(())
     }
 }
 

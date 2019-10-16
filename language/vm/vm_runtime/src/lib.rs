@@ -98,7 +98,7 @@
 //!             +-----------------------------+
 //! ```
 
-#[macro_use]
+//#[macro_use]
 extern crate vm;
 #[macro_use]
 extern crate lazy_static;
@@ -106,14 +106,20 @@ extern crate lazy_static;
 extern crate rental;
 #[macro_use]
 extern crate mirai_annotations;
+#[macro_use]
+mod counters;
+
+#[cfg(feature = "mirai-contracts")]
+pub mod foreign_contracts;
 
 mod block_processor;
-mod counters;
 mod frame;
 mod gas_meter;
 mod move_vm;
 mod process_txn;
 mod runtime;
+#[cfg(test)]
+mod unit_tests;
 
 pub mod code_cache;
 pub mod data_cache;
@@ -136,16 +142,7 @@ use types::{
     transaction::{SignedTransaction, TransactionOutput},
     vm_error::VMStatus,
 };
-use vm::{errors::VMInvariantViolation, IndexKind};
-
-pub(crate) fn bounded_fetch<T>(
-    pool: &[T],
-    idx: usize,
-    bound_type: IndexKind,
-) -> Result<&T, VMInvariantViolation> {
-    pool.get(idx)
-        .ok_or_else(|| VMInvariantViolation::IndexOutOfBounds(bound_type, pool.len(), idx))
-}
+use vm::IndexKind;
 
 /// This trait describes the VM's verification interfaces.
 pub trait VMVerifier {

@@ -28,14 +28,15 @@ use std::collections::BTreeSet;
 use types::language_storage::ModuleId;
 
 use std::collections::BTreeMap;
+use types::identifier::IdentStr;
 
 /// Represents a lazily evaluated abstraction over a module.
 ///
 /// `T` here is any sort of `ModuleAccess`. See the documentation in access.rs for more.
 pub struct ModuleView<'a, T> {
     module: &'a T,
-    name_to_function_definition_view: BTreeMap<&'a str, FunctionDefinitionView<'a, T>>,
-    name_to_struct_definition_view: BTreeMap<&'a str, StructDefinitionView<'a, T>>,
+    name_to_function_definition_view: BTreeMap<&'a IdentStr, FunctionDefinitionView<'a, T>>,
+    name_to_struct_definition_view: BTreeMap<&'a IdentStr, StructDefinitionView<'a, T>>,
 }
 
 impl<'a, T: ModuleAccess> ModuleView<'a, T> {
@@ -143,11 +144,14 @@ impl<'a, T: ModuleAccess> ModuleView<'a, T> {
             .map(move |locals_signature| LocalsSignatureView::new(module, locals_signature))
     }
 
-    pub fn function_definition(&self, name: &'a str) -> Option<&FunctionDefinitionView<'a, T>> {
+    pub fn function_definition(
+        &self,
+        name: &'a IdentStr,
+    ) -> Option<&FunctionDefinitionView<'a, T>> {
         self.name_to_function_definition_view.get(name)
     }
 
-    pub fn struct_definition(&self, name: &'a str) -> Option<&StructDefinitionView<'a, T>> {
+    pub fn struct_definition(&self, name: &'a IdentStr) -> Option<&StructDefinitionView<'a, T>> {
         self.name_to_struct_definition_view.get(name)
     }
 
@@ -160,11 +164,7 @@ impl<'a, T: ModuleAccess> ModuleView<'a, T> {
         }
 
         // TODO these unwraps should be VMInvariantViolations
-        let function_name = self
-            .as_inner()
-            .string_pool()
-            .get(function_handle.name.0 as usize)
-            .unwrap();
+        let function_name = self.as_inner().identifier_at(function_handle.name);
         let function_def = self.function_definition(function_name).unwrap();
         function_def
             .as_inner()
@@ -226,8 +226,8 @@ impl<'a, T: ModuleAccess> StructHandleView<'a, T> {
         self.module.module_handle_at(self.struct_handle.module)
     }
 
-    pub fn name(&self) -> &'a str {
-        self.module.string_at(self.struct_handle.name)
+    pub fn name(&self) -> &'a IdentStr {
+        self.module.identifier_at(self.struct_handle.name)
     }
 
     pub fn module_id(&self) -> ModuleId {
@@ -252,8 +252,8 @@ impl<'a, T: ModuleAccess> FunctionHandleView<'a, T> {
         self.module.module_handle_at(self.function_handle.module)
     }
 
-    pub fn name(&self) -> &'a str {
-        self.module.string_at(self.function_handle.name)
+    pub fn name(&self) -> &'a IdentStr {
+        self.module.identifier_at(self.function_handle.name)
     }
 
     pub fn signature(&self) -> FunctionSignatureView<'a, T> {
@@ -318,7 +318,7 @@ impl<'a, T: ModuleAccess> StructDefinitionView<'a, T> {
         }
     }
 
-    pub fn name(&self) -> &'a str {
+    pub fn name(&self) -> &'a IdentStr {
         self.struct_handle_view.name()
     }
 }
@@ -333,8 +333,8 @@ impl<'a, T: ModuleAccess> FieldDefinitionView<'a, T> {
         Self { module, field_def }
     }
 
-    pub fn name(&self) -> &'a str {
-        self.module.string_at(self.field_def.name)
+    pub fn name(&self) -> &'a IdentStr {
+        self.module.identifier_at(self.field_def.name)
     }
 
     pub fn type_signature(&self) -> TypeSignatureView<'a, T> {
@@ -387,7 +387,7 @@ impl<'a, T: ModuleAccess> FunctionDefinitionView<'a, T> {
         LocalsSignatureView::new(self.module, locals_signature)
     }
 
-    pub fn name(&self) -> &'a str {
+    pub fn name(&self) -> &'a IdentStr {
         self.function_handle_view.name()
     }
 
@@ -420,13 +420,13 @@ impl<'a, T: ModuleAccess> TypeSignatureView<'a, T> {
     }
 
     #[inline]
-    pub fn kind(&self) -> Kind {
-        self.token().kind()
+    pub fn kind(&self, type_formals: &[Kind]) -> Kind {
+        self.token().kind(type_formals)
     }
 
     #[inline]
-    pub fn contains_nominal_resource(&self) -> bool {
-        self.token().contains_nominal_resource()
+    pub fn contains_nominal_resource(&self, type_formals: &[Kind]) -> bool {
+        self.token().contains_nominal_resource(type_formals)
     }
 }
 
@@ -531,54 +531,29 @@ impl<'a, T: ModuleAccess> SignatureTokenView<'a, T> {
         self.token.signature_token_kind()
     }
 
-    #[inline]
-    pub fn kind(&self) -> Kind {
-        match self.token {
-            // TODO: Type actuals are ignored, fix it (generics).
-            SignatureToken::Struct(sh_idx, type_arguments) => {
-                let is_nominal_resource = StructHandleView::new(self.module, self.module.struct_handle_at(*sh_idx))
-                    .is_nominal_resource();
-                // Nominal resources are always of kind `Kind::Resource`
-                if is_nominal_resource {
-                    return Kind::Resource
-                }
-
-                // For other structs, their kind is dependent on their type arguments
-                // - If any type argument is `Kind::All`, returns `Kind:All`
-                // - Otherwise if any type argument is `Kind::Resource`, returns `Kind::Resource`
-                // - Otherwise returns `Kind::Unrestricted`
-                type_arguments.iter().map(
-                    |token| Self::new(self.module, token).kind()
-                ).fold(Kind::Unrestricted, |acc_kind, next_kind| {
-                    match (acc_kind, next_kind) {
-                        (Kind::All, _) | (_, Kind::All) => Kind::All,
-                        (Kind::Resource, _) | (_, Kind::Resource) => Kind::Resource,
-                        (Kind::Unrestricted, Kind::Unrestricted) => Kind::Unrestricted
-                    }
-                })
-            }
-            SignatureToken::Reference(_)
-            | SignatureToken::MutableReference(_)
-            | SignatureToken::Bool
-            | SignatureToken::U64
-            | SignatureToken::String
-            | SignatureToken::ByteArray
-            | SignatureToken::Address => Kind::Unrestricted,
-            // TODO: To get the kind of a type parameter we need to look at the struct/function
-            // that contains it. Change the API or remodel accesses/views with a tiered system.
-            SignatureToken::TypeParameter(_) => panic!("cannot tell if a type parameter is a resource or not (feature not yet implemented)"),
-        }
+    // TODO: rework views to make the interfaces here cleaner.
+    pub fn kind(&self, type_formals: &[Kind]) -> Kind {
+        SignatureToken::kind((self.module.struct_handles(), type_formals), self.token)
     }
 
-    pub fn contains_nominal_resource(&self) -> bool {
+    /// Determines if the given signature token contains a nominal resource.
+    /// More specifically, a signature token contains a nominal resource if
+    ///   1) it is a type variable explicitly marked as resource kind.
+    ///   2) it is a struct that
+    ///       a) is marked as resource.
+    ///       b) has a type actual which is a nominal resource.
+    ///
+    /// Similar to `SignatureTokenView::kind`, the context is used for looking up struct
+    /// definitions & type formals.
+    // TODO: refactor views so that we get the type formals from self.
+    pub fn contains_nominal_resource(&self, type_formals: &[Kind]) -> bool {
         match self.token {
-            // TODO: Type actuals are ignored, fix it (generics).
             SignatureToken::Struct(sh_idx, type_arguments) => {
                 StructHandleView::new(self.module, self.module.struct_handle_at(*sh_idx))
                     .is_nominal_resource()
-                    || type_arguments
-                        .iter()
-                        .any(|token| Self::new(self.module, token).contains_nominal_resource())
+                    || type_arguments.iter().any(|token| {
+                        Self::new(self.module, token).contains_nominal_resource(type_formals)
+                    })
             }
             SignatureToken::Reference(_)
             | SignatureToken::MutableReference(_)
@@ -586,8 +561,12 @@ impl<'a, T: ModuleAccess> SignatureTokenView<'a, T> {
             | SignatureToken::U64
             | SignatureToken::String
             | SignatureToken::ByteArray
-            | SignatureToken::Address
-            | SignatureToken::TypeParameter(_) => false,
+            | SignatureToken::Address => false,
+
+            SignatureToken::TypeParameter(idx) => match type_formals[*idx as usize] {
+                Kind::Resource => true,
+                Kind::All | Kind::Unrestricted => false,
+            },
         }
     }
 

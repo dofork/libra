@@ -4,7 +4,10 @@
 //! All proofs generated in this module are not valid proofs. They are only for the purpose of
 //! testing conversion between Rust and Protobuf.
 
-use crate::proof::{AccumulatorConsistencyProof, AccumulatorProof, SparseMerkleProof};
+use crate::proof::{
+    definition::MAX_ACCUMULATOR_PROOF_DEPTH, AccumulatorConsistencyProof, AccumulatorProof,
+    SparseMerkleProof,
+};
 use crypto::{
     hash::{ACCUMULATOR_PLACEHOLDER_HASH, SPARSE_MERKLE_PLACEHOLDER_HASH},
     HashValue,
@@ -14,8 +17,8 @@ use rand::{seq::SliceRandom, thread_rng};
 
 prop_compose! {
     fn arb_accumulator_proof()(
-        non_default_siblings in vec(any::<HashValue>(), 0..63usize),
-        total_num_siblings in 0..64usize,
+        non_default_siblings in vec(any::<HashValue>(), 0..MAX_ACCUMULATOR_PROOF_DEPTH),
+        total_num_siblings in 0..=MAX_ACCUMULATOR_PROOF_DEPTH,
     ) -> AccumulatorProof {
         let mut siblings = non_default_siblings;
         if !siblings.is_empty() {
@@ -51,13 +54,9 @@ prop_compose! {
 
 prop_compose! {
     fn arb_accumulator_consistency_proof()(
-        frozen_subtree_roots in vec(any::<HashValue>(), 1..64),
-        non_default_siblings in vec(any::<HashValue>(), 0..30),
-        default_siblings in vec(any::<HashValue>(), 0..30),
+        subtrees in vec(any::<HashValue>(), 0..=MAX_ACCUMULATOR_PROOF_DEPTH),
     ) -> AccumulatorConsistencyProof {
-        let mut siblings = non_default_siblings;
-        siblings.extend(default_siblings.into_iter());
-        AccumulatorConsistencyProof::new(frozen_subtree_roots, siblings)
+        AccumulatorConsistencyProof::new(subtrees)
     }
 }
 

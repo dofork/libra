@@ -2,7 +2,7 @@
 FROM debian:stretch as builder
 
 RUN echo "deb http://deb.debian.org/debian stretch-backports main" > /etc/apt/sources.list.d/backports.list \
-    && apt-get update && apt-get install -y protobuf-compiler/stretch-backports cmake golang curl \
+    && apt-get update && apt-get install -y protobuf-compiler/stretch-backports cmake curl clang \
     && apt-get clean && rm -r /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
@@ -21,10 +21,10 @@ FROM debian:stretch
 
 RUN mkdir -p /opt/libra/bin /opt/libra/etc
 COPY --from=builder /libra/target/release/client /opt/libra/bin/libra_client
-COPY scripts/cli/trusted_peers.config.toml /opt/libra/etc/trusted_peers.config.toml
+COPY scripts/cli/consensus_peers.config.toml /opt/libra/etc/consensus_peers.config.toml
 
 ENTRYPOINT ["/opt/libra/bin/libra_client"]
-CMD ["--host", "ac.testnet.libra.org", "--port", "8000", "-s", "/opt/libra/etc/trusted_peers.config.toml"]
+CMD ["--host", "ac.testnet.libra.org", "--port", "8000", "-s", "/opt/libra/etc/consensus_peers.config.toml"]
 
 ARG BUILD_DATE
 ARG GIT_REV

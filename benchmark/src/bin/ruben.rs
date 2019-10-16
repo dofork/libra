@@ -1,6 +1,11 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use benchmark::{
+    bin_utils::{create_benchmarker_from_opt, measure_throughput, try_start_metrics_server},
+    cli_opt::{RubenOpt, TransactionPattern},
+    load_generator::{LoadGenerator, PairwiseTransferTxnGenerator, RingTransferTxnGenerator},
+};
 /// To run benchmarking experiment, RuBen creates two key required components:
 /// * An object that implements LoadGenerator trait, which generates accounts and offline
 ///   requests that to be submitted during both setup stage and testing stage.
@@ -24,11 +29,6 @@
 ///
 /// By conforming to the LoadGenerator APIs,
 /// this flow is basically the same for different LoadGenerators/experiments.
-use benchmark::{
-    bin_utils::{create_benchmarker_from_opt, measure_throughput, try_start_metrics_server},
-    cli_opt::{RubenOpt, TransactionPattern},
-    load_generator::{LoadGenerator, PairwiseTransferTxnGenerator, RingTransferTxnGenerator},
-};
 use logger::{self, prelude::*};
 use std::ops::DerefMut;
 
@@ -66,30 +66,29 @@ mod tests {
         OP_COUNTER,
     };
     use client::AccountData;
-    use config_builder::swarm_config::LibraSwarmTopology;
+    use config::config::RoleType;
     use libra_swarm::swarm::LibraSwarm;
     use rusty_fork::{rusty_fork_id, rusty_fork_test, rusty_fork_test_name};
     use std::ops::Range;
-    use tempdir::TempDir;
+    use tools::tempdir::TempPath;
 
     /// Start libra_swarm and create a BenchOpt struct for testing.
-    /// Must return the TempDir otherwise it will be freed somehow.
-    fn start_swarm_and_setup_arguments() -> (LibraSwarm, BenchOpt, Option<TempDir>) {
+    /// Must return the TempPath otherwise it will be freed somehow.
+    fn start_swarm_and_setup_arguments() -> (LibraSwarm, BenchOpt, Option<TempPath>) {
         let (faucet_account_keypair, faucet_key_file_path, temp_dir) =
             generate_keypair::load_faucet_key_or_create_default(None);
-        let topology = LibraSwarmTopology::create_validator_network(4);
         let swarm = LibraSwarm::launch_swarm(
-            topology, /* num_nodes */
-            true,     /* disable_logging */
+            4, /* num_nodes */
+            RoleType::Validator,
+            true, /* disable_logging */
             faucet_account_keypair,
             None, /* config_dir */
             None, /* template_path */
+            None, /* upstream_path */
         );
         let mut args = BenchOpt {
             validator_addresses: Vec::new(),
-            swarm_config_dir: Some(String::from(
-                swarm.dir.as_ref().unwrap().as_ref().to_str().unwrap(),
-            )),
+            swarm_config_dir: Some(String::from(swarm.dir.as_ref().to_str().unwrap())),
             // Don't start metrics server as we are not testing with prometheus.
             metrics_server_address: None,
             faucet_key_file_path,
@@ -117,11 +116,11 @@ mod tests {
                 num_rounds,
                 num_epochs,
             );
-            let requested_txns = OP_COUNTER.counter("requested_txns").get();
-            let created_txns = OP_COUNTER.counter("created_txns").get();
-            let sign_failed_txns = OP_COUNTER.counter("sign_failed_txns").get();
-            assert_eq!(requested_txns, created_txns + sign_failed_txns);
-            let accepted_txns = OP_COUNTER.counter("submit_txns.Accepted").get();
+            let created_txns = OP_COUNTER.counter("create_txn_request.success").get();
+            let failed_to_create = OP_COUNTER.counter("create_txn_request.failure").get();
+            assert!(created_txns + failed_to_create == (4 * 4 * 2 + 4));
+            let accepted_txns = OP_COUNTER.counter("submit_txns.success").get();
+            assert!(accepted_txns <= created_txns);
             let committed_txns = OP_COUNTER.counter("committed_txns").get();
             let timedout_txns = OP_COUNTER.counter("timedout_txns").get();
             // Why `<=`: timedout TXNs in previous epochs can be committed in the next epoch.

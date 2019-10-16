@@ -1,13 +1,9 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    chained_bft::{
-        common::{Author, Height, Round},
-        consensus_types::{quorum_cert::QuorumCert, vote_data::VoteData},
-        safety::vote_msg::VoteMsgVerificationError,
-    },
-    state_replication::ExecutedState,
+use crate::chained_bft::{
+    common::{Author, Height, Round},
+    consensus_types::{quorum_cert::QuorumCert, vote_data::VoteData},
 };
 use canonical_serialization::{
     CanonicalDeserialize, CanonicalSerialize, CanonicalSerializer, SimpleSerializer,
@@ -16,6 +12,7 @@ use crypto::{
     hash::{BlockHasher, CryptoHash, CryptoHasher, GENESIS_BLOCK_ID},
     HashValue,
 };
+use executor::{ExecutedState, StateComputeResult};
 use failure::Result;
 use mirai_annotations::{assumed_postcondition, checked_precondition, checked_precondition_eq};
 use network::proto::Block as ProtoBlock;
@@ -26,6 +23,7 @@ use std::{
     collections::HashMap,
     convert::TryFrom,
     fmt::{Display, Formatter},
+    sync::Arc,
 };
 use types::{
     crypto_proxies::{LedgerInfoWithSignatures, Signature, ValidatorSigner, ValidatorVerifier},
@@ -35,22 +33,6 @@ use types::{
 #[cfg(test)]
 #[path = "block_test.rs"]
 pub mod block_test;
-
-#[derive(Debug)]
-pub enum BlockVerificationError {
-    /// Block hash is not equal to block id
-    InvalidBlockId,
-    /// Round must not be smaller than height and should be higher than parent's round.
-    InvalidBlockRound,
-    /// NIL block must not carry payload.
-    NilBlockWithPayload,
-    /// QC carried by the block does not certify its own parent.
-    QCDoesNotCertifyParent,
-    /// The verification of quorum cert of this block failed.
-    QCVerificationError(VoteMsgVerificationError),
-    /// The signature verification of this block failed.
-    SigVerifyError,
-}
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum BlockSource {
@@ -65,9 +47,9 @@ pub enum BlockSource {
     NilBlock,
 }
 
-/// Blocks are managed in a speculative tree, the committed blocks form a chain.
-/// Each block must know the id of its parent and keep the QuorurmCertificate to that parent.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+/// Block has the core data of a consensus block that should be persistent when necessary.
+/// Each block must know the id of its parent and keep the QuorurmCertificate to that parent.
 pub struct Block<T> {
     /// This block's id as a hash value
     id: HashValue,
@@ -105,6 +87,20 @@ pub struct Block<T> {
     block_source: BlockSource,
 }
 
+/// ExecutedBlocks are managed in a speculative tree, the committed blocks form a chain. Besides
+/// block data, each executed block also has other derived meta data which could be regenerated from
+/// blocks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutedBlock<T> {
+    /// Block data that cannot be regenerated.
+    block: Block<T>,
+    /// The state compute results is calculated for all the pending blocks prior to insertion to
+    /// the tree (the initial root node might not have it, because it's been already
+    /// committed). The execution results are not persisted: they're recalculated again for the
+    /// pending blocks upon restart.
+    compute_result: Arc<StateComputeResult>,
+}
+
 impl<T> Display for Block<T> {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         let nil_marker = if self.block_source == BlockSource::NilBlock {
@@ -120,6 +116,12 @@ impl<T> Display for Block<T> {
     }
 }
 
+impl<T> Display for ExecutedBlock<T> {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        self.block().fmt(f)
+    }
+}
+
 impl<T> Block<T>
 where
     T: Serialize + Default + CanonicalSerialize + PartialEq,
@@ -128,19 +130,20 @@ where
     pub fn make_genesis_block() -> Self {
         let ancestor_id = HashValue::zero();
         let genesis_validator_signer = ValidatorSigner::genesis();
-        let state = ExecutedState::state_for_genesis();
+        let state_id = ExecutedState::state_for_genesis().state_id;
         // Genesis carries a placeholder quorum certificate to its parent id with LedgerInfo
         // carrying information about version `0`.
         let genesis_quorum_cert = QuorumCert::new(
-            VoteData::new(ancestor_id, state, 0, ancestor_id, 0, ancestor_id, 0),
+            VoteData::new(ancestor_id, state_id, 0, ancestor_id, 0, ancestor_id, 0),
             LedgerInfoWithSignatures::new(
                 LedgerInfo::new(
                     0,
-                    state.state_id,
+                    state_id,
                     HashValue::zero(),
                     HashValue::zero(),
                     0,
                     0,
+                    None,
                 ),
                 HashMap::new(),
             ),
@@ -280,35 +283,43 @@ where
         &self.payload
     }
 
-    pub fn verify(
-        &self,
-        validator: &ValidatorVerifier,
-    ) -> ::std::result::Result<(), BlockVerificationError> {
+    /// Verifies that the proposal and the QC are correctly signed.
+    /// If this is the genesis block, we skip these checks.
+    pub fn validate_signatures(&self, validator: &ValidatorVerifier) -> failure::Result<()> {
+        // if genesis block, we don't verify anything
         if self.is_genesis_block() {
             return Ok(());
         }
-        if self.id() != self.hash() {
-            return Err(BlockVerificationError::InvalidBlockId);
-        }
-        if self.quorum_cert().certified_block_id() != self.parent_id() {
-            return Err(BlockVerificationError::QCDoesNotCertifyParent);
-        }
-        if self.quorum_cert().certified_block_round() >= self.round()
-            || self.round() < self.height()
-        {
-            return Err(BlockVerificationError::InvalidBlockRound);
-        }
+        // verify signature from leader if it's a real proposal
         if let BlockSource::Proposal { author, signature } = &self.block_source {
-            signature
-                .verify(validator, *author, self.hash())
-                .map_err(|_| BlockVerificationError::SigVerifyError)?;
-        } else if self.payload != T::default() {
-            // NIL block must not carry payload
-            return Err(BlockVerificationError::NilBlockWithPayload);
+            signature.verify(validator, *author, self.hash())?;
         }
-        self.quorum_cert
-            .verify(validator)
-            .map_err(BlockVerificationError::QCVerificationError)
+        // verify signatures of quorum cert
+        self.quorum_cert.verify(validator)
+    }
+
+    /// Makes sure that the proposal makes sense, independently of the current state.
+    /// If this is the genesis block, we skip these checks.
+    pub fn verify_well_formed(&self) -> failure::Result<()> {
+        if self.is_genesis_block() {
+            return Ok(());
+        }
+        ensure!(self.id() == self.hash(), "Block id mismatch the hash");
+        ensure!(
+            self.quorum_cert().certified_block_id() == self.parent_id(),
+            "Block's quorum cert doesn't certify parent"
+        );
+        ensure!(
+            self.quorum_cert().certified_block_round() < self.round()
+                && self.round() >= self.height(),
+            "Block has invalid round"
+        );
+        // NIL block must not carry payload
+        ensure!(
+            self.block_source != BlockSource::NilBlock || self.payload == T::default(),
+            "Nil block carries payload"
+        );
+        Ok(())
     }
 
     pub fn id(&self) -> HashValue {
@@ -374,6 +385,60 @@ where
 
     pub fn is_nil_block(&self) -> bool {
         self.block_source == BlockSource::NilBlock
+    }
+}
+
+impl<T> ExecutedBlock<T> {
+    pub fn new(block: Block<T>, compute_result: StateComputeResult) -> Self {
+        Self {
+            block,
+            compute_result: Arc::new(compute_result),
+        }
+    }
+
+    pub fn block(&self) -> &Block<T> {
+        &self.block
+    }
+
+    pub fn compute_result(&self) -> &Arc<StateComputeResult> {
+        &self.compute_result
+    }
+}
+
+impl<T> ExecutedBlock<T>
+where
+    T: Serialize + Default + CanonicalSerialize + PartialEq,
+{
+    pub fn get_payload(&self) -> &T {
+        self.block().get_payload()
+    }
+
+    pub fn id(&self) -> HashValue {
+        self.block().id()
+    }
+
+    pub fn parent_id(&self) -> HashValue {
+        self.block().parent_id()
+    }
+
+    pub fn height(&self) -> Height {
+        self.block().height()
+    }
+
+    pub fn round(&self) -> Round {
+        self.block().round()
+    }
+
+    pub fn timestamp_usecs(&self) -> u64 {
+        self.block().timestamp_usecs()
+    }
+
+    pub fn quorum_cert(&self) -> &QuorumCert {
+        self.block().quorum_cert()
+    }
+
+    pub fn is_nil_block(&self) -> bool {
+        self.block().is_nil_block()
     }
 }
 

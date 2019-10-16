@@ -1,9 +1,6 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// clippy warns on the Arbitrary impl for `Index` -- it's how Arbitrary works so ignore it.
-#![allow(clippy::unit_arg)]
-
 #[cfg(test)]
 mod unit_tests;
 
@@ -102,7 +99,7 @@ pub fn pick_slice_idxs(max: usize, indexes: &[impl AsRef<PropIndex>]) -> Vec<usi
 ///
 /// There is no blanket `impl<T> AsRef<T> for T`, so `&[PropIndex]` doesn't work with
 /// `&[impl AsRef<PropIndex>]` (unless an impl gets added upstream). `Index` does.
-#[derive(Arbitrary, Clone, Debug)]
+#[derive(Arbitrary, Clone, Copy, Debug)]
 pub struct Index(PropIndex);
 
 impl AsRef<PropIndex> for Index {

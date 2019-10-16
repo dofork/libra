@@ -15,7 +15,6 @@ use crate::{
 use accumulator::{HashReader, MerkleAccumulator};
 use arc_swap::ArcSwap;
 use crypto::{
-    ed25519::*,
     hash::{CryptoHash, TransactionAccumulatorHasher},
     HashValue,
 };
@@ -24,11 +23,8 @@ use itertools::Itertools;
 use schemadb::{ReadOptions, DB};
 use std::{ops::Deref, sync::Arc};
 use types::{
-    ledger_info::LedgerInfoWithSignatures,
-    proof::{
-        position::{FrozenSubTreeIterator, Position},
-        AccumulatorProof,
-    },
+    crypto_proxies::LedgerInfoWithSignatures,
+    proof::{position::Position, AccumulatorProof},
     transaction::{TransactionInfo, Version},
 };
 
@@ -38,7 +34,7 @@ pub(crate) struct LedgerStore {
     /// We almost always need the latest ledger info and signatures to serve read requests, so we
     /// cache it in memory in order to avoid reading DB and deserializing the object frequently. It
     /// should be updated every time new ledger info and signatures are persisted.
-    latest_ledger_info: ArcSwap<Option<LedgerInfoWithSignatures<Ed25519Signature>>>,
+    latest_ledger_info: ArcSwap<Option<LedgerInfoWithSignatures>>,
 }
 
 impl LedgerStore {
@@ -61,37 +57,31 @@ impl LedgerStore {
         }
     }
 
-    /// Return the ledger infos with their least 2f+1 signatures starting from `start_version` to
+    /// Return the ledger infos with their least 2f+1 signatures starting from `start_epoch` to
     /// the most recent one.
     /// Note: ledger infos and signatures are only available at the last version of each earlier
     /// epoch and at the latest version of current epoch.
-    #[cfg(test)]
-    fn get_ledger_infos(
+    pub fn get_latest_ledger_infos_per_epoch(
         &self,
         start_epoch: u64,
-    ) -> Result<Vec<LedgerInfoWithSignatures<Ed25519Signature>>> {
+    ) -> Result<Vec<LedgerInfoWithSignatures>> {
         let mut iter = self.db.iter::<LedgerInfoSchema>(ReadOptions::default())?;
         iter.seek(&start_epoch)?;
         Ok(iter.map(|kv| Ok(kv?.1)).collect::<Result<Vec<_>>>()?)
     }
 
-    pub fn get_latest_ledger_info_option(
-        &self,
-    ) -> Option<LedgerInfoWithSignatures<Ed25519Signature>> {
+    pub fn get_latest_ledger_info_option(&self) -> Option<LedgerInfoWithSignatures> {
         let ledger_info_ptr = self.latest_ledger_info.load();
         let ledger_info: &Option<_> = ledger_info_ptr.deref();
         ledger_info.clone()
     }
 
-    pub fn get_latest_ledger_info(&self) -> Result<LedgerInfoWithSignatures<Ed25519Signature>> {
+    pub fn get_latest_ledger_info(&self) -> Result<LedgerInfoWithSignatures> {
         self.get_latest_ledger_info_option()
             .ok_or_else(|| LibraDbError::NotFound(String::from("Genesis LedgerInfo")).into())
     }
 
-    pub fn set_latest_ledger_info(
-        &self,
-        ledger_info_with_sigs: LedgerInfoWithSignatures<Ed25519Signature>,
-    ) {
+    pub fn set_latest_ledger_info(&self, ledger_info_with_sigs: LedgerInfoWithSignatures) {
         self.latest_ledger_info
             .store(Arc::new(Some(ledger_info_with_sigs)));
     }
@@ -136,7 +126,11 @@ impl LedgerStore {
         version: Version,
         ledger_version: Version,
     ) -> Result<AccumulatorProof> {
-        Accumulator::get_proof(self, ledger_version + 1 /* num_leaves */, version)
+        Accumulator::get_proof(
+            self,
+            (ledger_version + 1) as usize, /* num_leaves */
+            version,
+        )
     }
 
     /// Write `txn_infos` to `batch`. Assigned `first_version` to the the version number of the
@@ -157,7 +151,7 @@ impl LedgerStore {
         let txn_hashes: Vec<HashValue> = txn_infos.iter().map(TransactionInfo::hash).collect();
         let (root_hash, writes) = Accumulator::append(
             self,
-            first_version, /* num_existing_leaves */
+            first_version as usize, /* num_existing_leaves */
             &txn_hashes,
         )?;
         writes
@@ -170,7 +164,7 @@ impl LedgerStore {
     /// Write `ledger_info` to `cs`.
     pub fn put_ledger_info(
         &self,
-        ledger_info_with_sigs: &LedgerInfoWithSignatures<Ed25519Signature>,
+        ledger_info_with_sigs: &LedgerInfoWithSignatures,
         cs: &mut ChangeSet,
     ) -> Result<()> {
         cs.batch.put::<LedgerInfoSchema>(
@@ -181,19 +175,7 @@ impl LedgerStore {
 
     /// From left to right, get frozen subtree root hashes of the transaction accumulator.
     pub fn get_ledger_frozen_subtree_hashes(&self, version: Version) -> Result<Vec<HashValue>> {
-        FrozenSubTreeIterator::new(version + 1)
-            .map(|pos| {
-                self.db
-                    .get::<TransactionAccumulatorSchema>(&pos)?
-                    .ok_or_else(|| {
-                        LibraDbError::NotFound(format!(
-                            "Txn Accumulator node at pos {}",
-                            pos.to_inorder_index()
-                        ))
-                        .into()
-                    })
-            })
-            .collect::<Result<Vec<_>>>()
+        Accumulator::get_frozen_subtree_hashes(self, version as usize + 1)
     }
 }
 
@@ -203,7 +185,7 @@ impl HashReader for LedgerStore {
     fn get(&self, position: Position) -> Result<HashValue> {
         self.db
             .get::<TransactionAccumulatorSchema>(&position)?
-            .ok_or_else(|| format_err!("Does not exist."))
+            .ok_or_else(|| format_err!("{} does not exist.", position))
     }
 }
 

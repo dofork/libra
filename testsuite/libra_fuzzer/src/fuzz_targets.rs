@@ -57,8 +57,10 @@ macro_rules! proto_fuzz_target {
 }
 
 // List fuzz target modules here.
+mod admission_control;
 mod compiled_module;
-mod raw_transaction;
+mod consensus_proposal;
+mod inner_signed_transaction;
 mod signed_transaction;
 mod vm_value;
 
@@ -67,9 +69,11 @@ lazy_static! {
         let targets: Vec<Box<dyn FuzzTargetImpl>> = vec![
             // List fuzz targets here in this format.
             Box::new(compiled_module::CompiledModuleTarget::default()),
-            Box::new(raw_transaction::RawTransactionTarget::default()),
             Box::new(signed_transaction::SignedTransactionTarget::default()),
+            Box::new(inner_signed_transaction::SignedTransactionTarget::default()),
             Box::new(vm_value::ValueTarget::default()),
+            Box::new(consensus_proposal::ConsensusProposal::default()),
+            Box::new(admission_control::AdmissionControlSubmitTransactionRequest::default()),
         ];
         targets.into_iter().map(|target| (target.name(), target)).collect()
     };
@@ -82,10 +86,7 @@ impl FuzzTarget {
     /// Get the current fuzz target from the environment.
     pub fn from_env() -> Result<Self> {
         let name = env::var(Self::ENV_VAR)?;
-        match Self::by_name(&name) {
-            Some(target) => Ok(target),
-            None => bail!("Unknown fuzz target '{}'", name),
-        }
+        Self::by_name(&name).ok_or_else(|| format_err!("Unknown fuzz target '{}'", name))
     }
 
     /// Get a fuzz target by name.

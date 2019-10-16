@@ -3,7 +3,7 @@
 
 //! Defines constants and types that are used throughout cost synthesis.
 use vm::file_format::TableIndex;
-use vm_runtime_types::value::Local;
+use vm_runtime_types::value::Value;
 
 /// The maximum number of fields that will be generated for any struct.
 pub const MAX_FIELDS: usize = 10;
@@ -30,10 +30,4 @@ pub const MAX_RETURN_TYPES_LENGTH: usize = 4;
 pub const DEFAULT_FUNCTION_IDX: TableIndex = 0;
 
 /// The type of the value stack.
-pub type Stack = Vec<Local>;
-
-/// The minimum number of instructions to generate for function bodies
-pub const MIN_BYTECODE_INSTRUCTIONS: usize = 10;
-
-/// The maximum number of instructions to generate for function bodies
-pub const MAX_BYTECODE_INSTRUCTIONS: usize = 20;
+pub type Stack = Vec<Value>;

@@ -7,6 +7,7 @@ use stackless_bytecode_generator::{
     stackless_bytecode_generator::{StacklessFunction, StacklessModuleGenerator},
 };
 use std::collections::{BTreeMap, BTreeSet};
+use types::identifier::Identifier;
 use vm::{
     access::ModuleAccess,
     file_format::{
@@ -24,7 +25,7 @@ pub struct BoogieTranslator {
     pub modules: Vec<VerifiedModule>,
     pub struct_defs: BTreeMap<String, usize>,
     pub max_struct_depth: usize,
-    pub module_name_to_idx: BTreeMap<String, usize>,
+    pub module_name_to_idx: BTreeMap<Identifier, usize>,
 }
 
 pub struct ModuleTranslator<'a> {
@@ -36,18 +37,17 @@ pub struct ModuleTranslator<'a> {
 impl BoogieTranslator {
     pub fn new(modules: &[VerifiedModule]) -> Self {
         let mut struct_defs: BTreeMap<String, usize> = BTreeMap::new();
-        let mut module_name_to_idx: BTreeMap<String, usize> = BTreeMap::new();
+        let mut module_name_to_idx: BTreeMap<Identifier, usize> = BTreeMap::new();
         for (module_idx, module) in modules.iter().enumerate() {
-            let module_name = module
-                .string_at(module.module_handle_at(ModuleHandleIndex::new(0)).name)
-                .to_string();
-            module_name_to_idx.insert(module_name.clone(), module_idx);
+            let module_name =
+                module.identifier_at(module.module_handle_at(ModuleHandleIndex::new(0)).name);
+            module_name_to_idx.insert(module_name.into(), module_idx);
             for (idx, struct_def) in module.struct_defs().iter().enumerate() {
                 let struct_name = format!(
                     "{}_{}",
                     module_name,
                     module
-                        .string_at(module.struct_handle_at(struct_def.struct_handle).name)
+                        .identifier_at(module.struct_handle_at(struct_def.struct_handle).name)
                         .to_string()
                 );
                 struct_defs.insert(struct_name, idx);
@@ -104,14 +104,14 @@ impl BoogieTranslator {
     pub fn emit_struct_code(&mut self) -> String {
         let mut res = String::new();
         for module in self.modules.iter() {
-            let mut handle_to_def = BTreeMap::new();
-            for (idx, struct_def) in module.struct_defs().iter().enumerate() {
-                handle_to_def.insert(struct_def.struct_handle, idx);
-            }
             for (def_idx, struct_def) in module.struct_defs().iter().enumerate() {
                 let struct_name = struct_name_from_handle_index(module, struct_def.struct_handle);
                 res.push_str(&format!("const unique {}: TypeName;\n", struct_name));
                 res.push_str(&format!("var rs_{}: ResourceStore;\n", struct_name));
+                let struct_definition_view = StructDefinitionView::new(module, struct_def);
+                if struct_definition_view.is_native() {
+                    continue;
+                }
                 let field_info = get_field_info_from_def_index(module, def_idx);
                 for (field_name, _) in field_info {
                     res.push_str(&format!(
@@ -139,7 +139,7 @@ impl BoogieTranslator {
             let mut max_field_depth = 0;
             let struct_handle = module.struct_handle_at(*idx);
             let struct_handle_view = StructHandleView::new(module, struct_handle);
-            let module_name = module.string_at(struct_handle_view.module_handle().name);
+            let module_name = module.identifier_at(struct_handle_view.module_handle().name);
             let def_module_idx = self
                 .module_name_to_idx
                 .get(module_name)
@@ -152,6 +152,9 @@ impl BoogieTranslator {
                 .expect("can't find struct def");
             let struct_definition = &def_module.struct_defs()[def_idx];
             let struct_definition_view = StructDefinitionView::new(def_module, struct_definition);
+            if struct_definition_view.is_native() {
+                return 0;
+            }
             for field_definition_view in struct_definition_view.fields().unwrap() {
                 let field_depth = self.get_struct_depth(
                     def_module,
@@ -280,12 +283,16 @@ impl<'a> ModuleTranslator<'a> {
             FreezeRef(dest, src) => vec![format!("call t{} := FreezeRef(t{});", dest, src)],
             Call(dests, callee_index, args) => {
                 let callee_name = self.function_name_from_handle_index(*callee_index);
+                let callee_function_handle = self.module.function_handle_at(*callee_index);
+                let callee_function_signature = self
+                    .module
+                    .function_signature_at(callee_function_handle.signature);
                 let mut dest_str = String::new();
                 let mut args_str = String::new();
                 let mut dest_type_assumptions = vec![];
-                for arg in args.iter() {
+                for (i, arg) in args.iter().enumerate() {
                     args_str.push_str(&format!(", t{}", arg));
-                    if self.is_local_mutable_ref(*arg, func_idx) {
+                    if callee_function_signature.arg_types[i].is_mutable_reference() {
                         dest_str.push_str(&format!(", t{}", arg));
                         dest_type_assumptions.push(self.format_type_checking(
                             format!("t{}", arg),
@@ -522,7 +529,7 @@ impl<'a> ModuleTranslator<'a> {
         let code = &self.stackless_bytecode[idx];
 
         res.push_str("\n{\n");
-        res.push_str("    // declare local variables\n".into());
+        res.push_str("    // declare local variables\n");
 
         let function_handle = self.module.function_handle_at(function_def.function);
         let function_signature = self.module.function_signature_at(function_handle.signature);
@@ -581,7 +588,7 @@ impl<'a> ModuleTranslator<'a> {
         res.push_str(&arg_assignment_str);
         res.push_str("\n    // assign ResourceStores to locals so they can be modified\n");
         res.push_str("    addr_exists' := addr_exists;\n");
-        res.push_str("\n    // bytecode translation starts here\n".into());
+        res.push_str("\n    // bytecode translation starts here\n");
 
         // identify all the branching targets so we can insert labels in front of them
         let mut branching_targets: BTreeSet<usize> = BTreeSet::new();
@@ -678,7 +685,7 @@ impl<'a> ModuleTranslator<'a> {
                 }
             }
         }
-        res.push_str("}\n".into());
+        res.push_str("}\n");
         res
     }
 
@@ -725,7 +732,8 @@ impl<'a> ModuleTranslator<'a> {
         let module_handle_index = function_handle.module;
         let mut module_name = self
             .module
-            .string_at(self.module.module_handle_at(module_handle_index).name);
+            .identifier_at(self.module.module_handle_at(module_handle_index).name)
+            .as_str();
         if module_name == "<SELF>" {
             module_name = "self";
         } // boogie doesn't allow '<' or '>'
@@ -777,7 +785,7 @@ impl<'a> ModuleTranslator<'a> {
 pub fn struct_name_from_handle_index(module: &VerifiedModule, idx: StructHandleIndex) -> String {
     let struct_handle = module.struct_handle_at(idx);
     let struct_handle_view = StructHandleView::new(module, struct_handle);
-    let module_name = module.string_at(struct_handle_view.module_handle().name);
+    let module_name = module.identifier_at(struct_handle_view.module_handle().name);
     let struct_name = struct_handle_view.name();
     format!("{}_{}", module_name, struct_name)
 }

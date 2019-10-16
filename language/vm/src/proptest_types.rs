@@ -3,11 +3,15 @@
 
 //! Utilities for property-based testing.
 
-use crate::file_format::{
-    AddressPoolIndex, CompiledModule, CompiledModuleMut, FieldDefinition, FieldDefinitionIndex,
-    FunctionHandle, FunctionSignatureIndex, Kind, MemberCount, ModuleHandle, ModuleHandleIndex,
-    SignatureToken, StringPoolIndex, StructDefinition, StructFieldInformation, StructHandle,
-    StructHandleIndex, TableIndex, TypeSignature, TypeSignatureIndex,
+use crate::{
+    file_format::{
+        AddressPoolIndex, CompiledModule, CompiledModuleMut, FieldDefinition, FieldDefinitionIndex,
+        FunctionHandle, FunctionSignatureIndex, IdentifierIndex, Kind, LocalsSignature,
+        MemberCount, ModuleHandle, ModuleHandleIndex, SignatureToken, StructDefinition,
+        StructFieldInformation, StructHandle, StructHandleIndex, TableIndex, TypeSignature,
+        TypeSignatureIndex,
+    },
+    vm_string::VMString,
 };
 use proptest::{
     collection::{vec, SizeRange},
@@ -16,7 +20,7 @@ use proptest::{
     sample::Index as PropIndex,
 };
 use proptest_helpers::GrowingSubset;
-use types::{account_address::AccountAddress, byte_array::ByteArray};
+use types::{account_address::AccountAddress, byte_array::ByteArray, identifier::Identifier};
 
 mod functions;
 mod signature;
@@ -106,7 +110,8 @@ impl CompiledModuleStrategyGen {
         // This ensures that there are no empty ByteArrays
         // TODO: Should we enable empty ByteArrays in Move, e.g. let byte_array = b"";
         let byte_array_pool_strat = vec(any::<ByteArray>(), 1..=self.size);
-        let string_pool_strat = vec(".*", 1..=self.size);
+        let identifiers_strat = vec(any::<Identifier>(), 1..=self.size);
+        let user_strings_strat = vec(any::<VMString>(), 1..=self.size);
 
         let type_signatures_strat = vec(SignatureTokenGen::strategy(), 1..=self.size);
         // Ensure at least one owned non-struct type signature.
@@ -152,7 +157,7 @@ impl CompiledModuleStrategyGen {
         (
             address_pool_strat,
             byte_array_pool_strat,
-            string_pool_strat,
+            (identifiers_strat, user_strings_strat),
             type_signatures_strat,
             owned_non_struct_strat,
             owned_type_sigs_strat,
@@ -168,7 +173,7 @@ impl CompiledModuleStrategyGen {
                 |(
                     address_pool,
                     byte_array_pool,
-                    string_pool,
+                    (identifiers, user_strings),
                     type_signatures,
                     owned_non_structs,
                     owned_type_sigs,
@@ -177,7 +182,8 @@ impl CompiledModuleStrategyGen {
                     (struct_defs, function_defs),
                 )| {
                     let address_pool_len = address_pool.len();
-                    let string_pool_len = string_pool.len();
+                    let identifiers_len = identifiers.len();
+                    let user_strings_len = user_strings.len();
                     let byte_array_pool_len = byte_array_pool.len();
                     let module_handles_len = module_handles.len();
                     // StDefnMaterializeState adds one new handle for each definition, so the total
@@ -229,8 +235,8 @@ impl CompiledModuleStrategyGen {
                             address: AddressPoolIndex::new(
                                 address_idx.index(address_pool_len) as TableIndex
                             ),
-                            name: StringPoolIndex::new(
-                                name_idx.index(string_pool_len) as TableIndex
+                            name: IdentifierIndex::new(
+                                name_idx.index(identifiers_len) as TableIndex
                             ),
                         })
                         .collect();
@@ -238,16 +244,18 @@ impl CompiledModuleStrategyGen {
                     let struct_handles: Vec<_> = struct_handles
                         .into_iter()
                         .map(
-                            |(module_idx, name_idx, is_nominal_resource, type_formals)| {
+                            |(module_idx, name_idx, is_nominal_resource, _type_formals)| {
                                 StructHandle {
                                     module: ModuleHandleIndex::new(
                                         module_idx.index(module_handles_len) as TableIndex,
                                     ),
-                                    name: StringPoolIndex::new(
-                                        name_idx.index(string_pool_len) as TableIndex
+                                    name: IdentifierIndex::new(
+                                        name_idx.index(identifiers_len) as TableIndex
                                     ),
                                     is_nominal_resource,
-                                    type_formals,
+                                    // TODO: re-enable type formals gen when we rework prop tests
+                                    // for generics
+                                    type_formals: vec![],
                                 }
                             },
                         )
@@ -259,8 +267,8 @@ impl CompiledModuleStrategyGen {
                             module: ModuleHandleIndex::new(
                                 module_idx.index(module_handles_len) as TableIndex
                             ),
-                            name: StringPoolIndex::new(
-                                name_idx.index(string_pool_len) as TableIndex
+                            name: IdentifierIndex::new(
+                                name_idx.index(identifiers_len) as TableIndex
                             ),
                             signature: FunctionSignatureIndex::new(
                                 signature_idx.index(function_signatures_len) as TableIndex,
@@ -270,7 +278,7 @@ impl CompiledModuleStrategyGen {
 
                     // Struct definitions also generate field definitions.
                     let mut state = StDefnMaterializeState {
-                        string_pool_len,
+                        identifiers_len,
                         owned_type_indexes,
                         struct_handles,
                         type_signatures,
@@ -295,7 +303,8 @@ impl CompiledModuleStrategyGen {
                     let mut state = FnDefnMaterializeState {
                         struct_handles_len,
                         address_pool_len,
-                        string_pool_len,
+                        identifiers_len,
+                        user_strings_len,
                         byte_array_pool_len,
                         function_handles_len,
                         type_signatures_len: type_signatures.len(),
@@ -304,7 +313,7 @@ impl CompiledModuleStrategyGen {
                         function_defs_len: function_defs.len(),
                         function_signatures,
                         // locals will be filled out by FunctionDefinitionGen::materialize
-                        locals_signatures: vec![],
+                        locals_signatures: vec![LocalsSignature(vec![])],
                         function_handles,
                     };
 
@@ -335,7 +344,8 @@ impl CompiledModuleStrategyGen {
                         function_signatures,
                         locals_signatures,
 
-                        string_pool,
+                        identifiers,
+                        user_strings,
                         byte_array_pool,
                         address_pool,
                     }
@@ -348,7 +358,7 @@ impl CompiledModuleStrategyGen {
 
 #[derive(Debug)]
 struct StDefnMaterializeState {
-    string_pool_len: usize,
+    identifiers_len: usize,
     // Struct definitions need to be nonrecursive -- this is ensured by only picking signatures
     // that either have no struct handle (represented as None), or have a handle less than the
     // one for the definition currently being added.
@@ -422,10 +432,11 @@ impl StructDefinitionGen {
             option::of(vec(FieldDefinitionGen::strategy(), member_count)),
         )
             .prop_map(
-                |(name_idx, is_nominal_resource, type_formals, is_public, field_defs)| Self {
+                |(name_idx, is_nominal_resource, _type_formals, is_public, field_defs)| Self {
                     name_idx,
                     is_nominal_resource,
-                    type_formals,
+                    // TODO: re-enable type formals gen once we rework prop tests for generics
+                    type_formals: vec![],
                     is_public,
                     field_defs,
                 },
@@ -443,8 +454,8 @@ impl StructDefinitionGen {
                 let handle = StructHandle {
                     // 0 represents the current module
                     module: ModuleHandleIndex::new(0),
-                    name: StringPoolIndex::new(
-                        self.name_idx.index(state.string_pool_len) as TableIndex
+                    name: IdentifierIndex::new(
+                        self.name_idx.index(state.identifiers_len) as TableIndex
                     ),
                     is_nominal_resource,
                     type_formals: self
@@ -477,8 +488,8 @@ impl StructDefinitionGen {
                 let handle = StructHandle {
                     // 0 represents the current module
                     module: ModuleHandleIndex::new(0),
-                    name: StringPoolIndex::new(
-                        self.name_idx.index(state.string_pool_len) as TableIndex
+                    name: IdentifierIndex::new(
+                        self.name_idx.index(state.identifiers_len) as TableIndex
                     ),
                     is_nominal_resource,
                     type_formals: self
@@ -523,7 +534,7 @@ impl FieldDefinitionGen {
     ) -> FieldDefinition {
         FieldDefinition {
             struct_: sh_idx,
-            name: StringPoolIndex::new(self.name_idx.index(state.string_pool_len) as TableIndex),
+            name: IdentifierIndex::new(self.name_idx.index(state.identifiers_len) as TableIndex),
             signature: *state.owned_type_indexes.pick_value(&self.signature_idx),
         }
     }

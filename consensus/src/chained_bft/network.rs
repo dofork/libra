@@ -3,20 +3,22 @@
 
 use crate::{
     chained_bft::{
-        block_storage::BlockRetrievalFailure,
         common::{Author, Payload},
         consensus_types::{
-            block::Block, proposal_msg::ProposalMsg, sync_info::SyncInfo, timeout_msg::TimeoutMsg,
+            block::Block,
+            proposal_msg::{ProposalMsg, ProposalUncheckedSignatures},
+            sync_info::SyncInfo,
+            timeout_msg::TimeoutMsg,
+            vote_msg::VoteMsg,
         },
         epoch_manager::EpochManager,
-        safety::vote_msg::VoteMsg,
     },
     counters,
 };
 use bytes::Bytes;
 use channel;
 use crypto::HashValue;
-use failure;
+use failure::{self, ResultExt};
 use futures::{
     channel::oneshot, stream::select, FutureExt, SinkExt, Stream, StreamExt, TryFutureExt,
     TryStreamExt,
@@ -43,26 +45,26 @@ pub struct BlockRetrievalResponse<T> {
 }
 
 impl<T: Payload> BlockRetrievalResponse<T> {
-    pub fn verify(&self, mut block_id: HashValue, num_blocks: u64) -> Result<(), failure::Error> {
-        if self.status == BlockRetrievalStatus::SUCCEEDED && self.blocks.len() as u64 != num_blocks
-        {
-            return Err(format_err!(
-                "not enough blocks returned, expect {}, get {}",
-                num_blocks,
-                self.blocks.len(),
-            ));
-        }
-        for block in self.blocks.iter() {
-            if block.id() != block_id {
-                return Err(format_err!(
+    pub fn verify(&self, block_id: HashValue, num_blocks: u64) -> failure::Result<()> {
+        ensure!(
+            self.status != BlockRetrievalStatus::SUCCEEDED
+                || self.blocks.len() as u64 == num_blocks,
+            "not enough blocks returned, expect {}, get {}",
+            num_blocks,
+            self.blocks.len(),
+        );
+        self.blocks
+            .iter()
+            .try_fold(block_id, |expected_id, block| {
+                ensure!(
+                    block.id() == expected_id,
                     "blocks doesn't form a chain: expect {}, get {}",
-                    block.id(),
-                    block_id
-                ));
-            }
-            block_id = block.parent_id();
-        }
-        Ok(())
+                    expected_id,
+                    block.id()
+                );
+                Ok(block.parent_id())
+            })
+            .map(|_| ())
     }
 }
 
@@ -93,8 +95,8 @@ pub struct ConsensusNetworkImpl {
     // Self sender and self receivers provide a shortcut for sending the messages to itself.
     // (self sending is not supported by the networking API).
     // Note that we do not support self rpc requests as it might cause infinite recursive calls.
-    self_sender: channel::Sender<Result<Event<ConsensusMsg>, failure::Error>>,
-    self_receiver: Option<channel::Receiver<Result<Event<ConsensusMsg>, failure::Error>>>,
+    self_sender: channel::Sender<failure::Result<Event<ConsensusMsg>>>,
+    self_receiver: Option<channel::Receiver<failure::Result<Event<ConsensusMsg>>>>,
     epoch_mgr: Arc<EpochManager>,
 }
 
@@ -181,10 +183,8 @@ impl ConsensusNetworkImpl {
         num_blocks: u64,
         from: Author,
         timeout: Duration,
-    ) -> Result<BlockRetrievalResponse<T>, BlockRetrievalFailure> {
-        if from == self.author {
-            return Err(BlockRetrievalFailure::SelfRetrieval);
-        }
+    ) -> failure::Result<BlockRetrievalResponse<T>> {
+        ensure!(from != self.author, "Retrieve block from self");
         let mut req_msg = RequestBlock::new();
         req_msg.set_block_id(block_id.into());
         req_msg.set_num_blocks(num_blocks);
@@ -197,23 +197,23 @@ impl ConsensusNetworkImpl {
             .await?;
         let mut blocks = vec![];
         for block in res_block.take_blocks().into_iter() {
-            if let Ok(block) = Block::from_proto(block) {
-                if block.verify(self.epoch_mgr.validators().as_ref()).is_err() {
-                    return Err(BlockRetrievalFailure::InvalidSignature);
+            match Block::from_proto(block) {
+                Ok(block) => {
+                    block
+                        .validate_signatures(self.epoch_mgr.validators().as_ref())
+                        .and_then(|_| block.verify_well_formed())
+                        .with_context(|e| format_err!("Invalid block because of {:?}", e))?;
+                    blocks.push(block);
                 }
-                blocks.push(block);
-            } else {
-                return Err(BlockRetrievalFailure::InvalidResponse);
-            }
+                Err(e) => bail!("Failed to deserialize block because of {:?}", e),
+            };
         }
         counters::BLOCK_RETRIEVAL_DURATION_S.observe_duration(pre_retrieval_instant.elapsed());
         let response = BlockRetrievalResponse {
             status: res_block.get_status(),
             blocks,
         };
-        if response.verify(block_id, num_blocks).is_err() {
-            return Err(BlockRetrievalFailure::InvalidResponse);
-        }
+        response.verify(block_id, num_blocks)?;
         Ok(response)
     }
 
@@ -315,7 +315,7 @@ struct NetworkTask<T, S> {
 
 impl<T, S> NetworkTask<T, S>
 where
-    S: Stream<Item = Result<Event<ConsensusMsg>, failure::Error>> + Unpin,
+    S: Stream<Item = failure::Result<Event<ConsensusMsg>>> + Unpin,
     T: Payload,
 {
     pub async fn run(mut self) {
@@ -323,7 +323,13 @@ where
             match message {
                 Event::Message((peer_id, mut msg)) => {
                     let r = if msg.has_proposal() {
-                        self.process_proposal(&mut msg).await
+                        self.process_proposal(&mut msg).await.map_err(|e| {
+                            security_log(SecurityEvent::InvalidConsensusProposal)
+                                .error(&e)
+                                .data(&msg)
+                                .log();
+                            e
+                        })
                     } else if msg.has_vote() {
                         self.process_vote(&mut msg).await
                     } else if msg.has_timeout_msg() {
@@ -360,16 +366,10 @@ where
     }
 
     async fn process_proposal<'a>(&'a mut self, msg: &'a mut ConsensusMsg) -> failure::Result<()> {
-        let proposal = ProposalMsg::<T>::from_proto(msg.take_proposal())?;
-        proposal
-            .verify(self.epoch_mgr.validators().as_ref())
-            .map_err(|e| {
-                security_log(SecurityEvent::InvalidConsensusProposal)
-                    .error(&e)
-                    .data(&proposal)
-                    .log();
-                e
-            })?;
+        let proposal = ProposalUncheckedSignatures::<T>::from_proto(msg.take_proposal())?;
+        let proposal = proposal
+            .validate_signatures(self.epoch_mgr.validators().as_ref())?
+            .verify_well_formed()?;
         debug!("Received proposal {}", proposal);
         self.proposal_tx.send(proposal).await?;
         Ok(())

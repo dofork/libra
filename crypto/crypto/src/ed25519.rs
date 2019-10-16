@@ -32,7 +32,6 @@
 use crate::{traits::*, HashValue};
 use core::convert::TryFrom;
 use crypto_derive::{SilentDebug, SilentDisplay};
-use curve25519_dalek::scalar::Scalar;
 use ed25519_dalek;
 use failure::prelude::*;
 use serde::{de, export, ser};
@@ -44,6 +43,12 @@ pub const ED25519_PRIVATE_KEY_LENGTH: usize = ed25519_dalek::SECRET_KEY_LENGTH;
 pub const ED25519_PUBLIC_KEY_LENGTH: usize = ed25519_dalek::PUBLIC_KEY_LENGTH;
 /// The length of the Ed25519Signature
 pub const ED25519_SIGNATURE_LENGTH: usize = ed25519_dalek::SIGNATURE_LENGTH;
+
+/// The order of ed25519 as defined in [RFC8032](https://tools.ietf.org/html/rfc8032).
+const L: [u8; 32] = [
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+];
 
 /// An Ed25519 private key
 #[derive(SilentDisplay, SilentDebug)]
@@ -108,42 +113,31 @@ impl Ed25519Signature {
         }
     }
 
-    /// Check for correct size and malleability issues.
-    /// This method ensures s is of canonical form and R does not lie on a small group.
+    /// Check for correct size and third-party based signature malleability issues.
+    /// This method is required to ensure that given a valid signature for some message under some
+    /// key, an attacker cannot produce another valid signature for the same message and key.
+    ///
+    /// According to [RFC8032](https://tools.ietf.org/html/rfc8032), signatures comprise elements
+    /// {R, S} and we should enforce that S is of canonical form (smaller than L, where L is the
+    /// order of edwards25519 curve group) to prevent signature malleability. Without this check,
+    /// one could add a multiple of L into S and still pass signature verification, resulting in
+    /// a distinct yet valid signature.
+    ///
+    /// This method does not check the R component of the signature, because R is hashed during
+    /// signing and verification to compute h = H(ENC(R) || ENC(A) || M), which means that a
+    /// third-party cannot modify R without being detected.
+    ///
+    /// Note: It's true that malicious signers can already produce varying signatures by
+    /// choosing a different nonce, so this method protects against malleability attacks performed
+    /// by a non-signer.
     pub fn check_malleability(bytes: &[u8]) -> std::result::Result<(), CryptoMaterialError> {
         if bytes.len() != ED25519_SIGNATURE_LENGTH {
             return Err(CryptoMaterialError::WrongLengthError);
         }
-
-        let mut s_bits: [u8; 32] = [0u8; 32];
-        s_bits.copy_from_slice(&bytes[32..]);
-
-        // Check if s is of canonical form.
-        // We actually test if s < order_of_the_curve to capture malleable signatures.
-        let s = Scalar::from_canonical_bytes(s_bits);
-        if s == None {
+        if !check_s_lt_l(&bytes[32..]) {
             return Err(CryptoMaterialError::CanonicalRepresentationError);
         }
-
-        // Check if the R lies on a small subgroup.
-        // Even though the security implications of a small order R are unclear,
-        // points of order <= 8 are rejected.
-        let mut r_bits: [u8; 32] = [0u8; 32];
-        r_bits.copy_from_slice(&bytes[..32]);
-
-        let compressed = curve25519_dalek::edwards::CompressedEdwardsY(r_bits);
-        let point = compressed.decompress();
-
-        match point {
-            Some(p) => {
-                if p.is_small_order() {
-                    Err(CryptoMaterialError::SmallSubgroupError)
-                } else {
-                    Ok(())
-                }
-            }
-            None => Err(CryptoMaterialError::DeserializationError),
-        }
+        Ok(())
     }
 }
 
@@ -505,10 +499,7 @@ impl<'de> de::Visitor<'de> for Ed25519PrivateKeyVisitor {
     where
         E: de::Error,
     {
-        match Ed25519PrivateKey::try_from(value) {
-            Ok(key) => Ok(key),
-            Err(error) => Err(E::custom(error)),
-        }
+        Ed25519PrivateKey::try_from(value).map_err(E::custom)
     }
 }
 
@@ -523,10 +514,7 @@ impl<'de> de::Visitor<'de> for Ed25519PublicKeyVisitor {
     where
         E: de::Error,
     {
-        match Ed25519PublicKey::try_from(value) {
-            Ok(key) => Ok(key),
-            Err(error) => Err(E::custom(error)),
-        }
+        Ed25519PublicKey::try_from(value).map_err(E::custom)
     }
 }
 
@@ -541,10 +529,7 @@ impl<'de> de::Visitor<'de> for Ed25519SignatureVisitor {
     where
         E: de::Error,
     {
-        match Ed25519Signature::try_from(value) {
-            Ok(key) => Ok(key),
-            Err(error) => Err(E::custom(error)),
-        }
+        Ed25519Signature::try_from(value).map_err(E::custom)
     }
 }
 
@@ -573,4 +558,17 @@ impl<'de> de::Deserialize<'de> for Ed25519Signature {
     {
         deserializer.deserialize_bytes(Ed25519SignatureVisitor {})
     }
+}
+
+/// Check if S < L to capture invalid signatures.
+fn check_s_lt_l(s: &[u8]) -> bool {
+    for i in (0..32).rev() {
+        if s[i] < L[i] {
+            return true;
+        } else if s[i] > L[i] {
+            return false;
+        }
+    }
+    // As this stage S == L which implies a non canonical S.
+    false
 }

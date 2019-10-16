@@ -35,11 +35,7 @@ impl AdmissionControlNode {
 
     /// Setup environment and start a new Admission Control service.
     pub fn run(&self) -> Result<()> {
-        logger::set_global_log_collector(
-            self.node_config
-                .log_collector
-                .get_log_collector_type()
-                .unwrap(),
+        let _logger_guard = logger::set_default_global_logger(
             self.node_config.log_collector.is_async,
             self.node_config.log_collector.chan_size,
         );
@@ -74,14 +70,13 @@ impl AdmissionControlNode {
         storage_client: Option<Arc<StorageReadServiceClient>>,
     ) -> Result<()> {
         // create storage client if doesn't exist
-        let storage_client: Arc<dyn StorageRead> = match storage_client {
-            Some(c) => c,
-            None => Arc::new(StorageReadServiceClient::new(
+        let storage_client: Arc<dyn StorageRead> = storage_client.unwrap_or_else(|| {
+            Arc::new(StorageReadServiceClient::new(
                 env,
                 &self.node_config.storage.address,
                 self.node_config.storage.port,
-            )),
-        };
+            ))
+        });
 
         let vm_validator = Arc::new(VMValidator::new(
             &self.node_config,

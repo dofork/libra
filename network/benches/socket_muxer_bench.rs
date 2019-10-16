@@ -1,7 +1,6 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#![feature(async_await)]
 // Allow KiB, MiB consts
 #![allow(non_upper_case_globals, non_snake_case)]
 // Allow fns to take &usize, since criterion only passes parameters by ref
@@ -135,7 +134,7 @@ fn bench_client_muxer_send<T, M>(
     client_transport: T,
 ) -> (M, impl Stream)
 where
-    T: Transport<Output = M> + Send + 'static,
+    T: Transport<Output = M> + Send + Sync + 'static,
     M: StreamMultiplexer + 'static,
 {
     // Client dials the server. Some of our transports have timeouts built in,

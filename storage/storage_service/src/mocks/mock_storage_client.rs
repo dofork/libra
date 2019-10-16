@@ -18,9 +18,9 @@ use storage_proto::StartupInfo;
 use types::{
     account_address::{AccountAddress, ADDRESS_LENGTH},
     account_state_blob::AccountStateBlob,
+    crypto_proxies::{LedgerInfoWithSignatures, ValidatorChangeEventWithProof},
     event::EventHandle,
     get_with_proof::{RequestItem, ResponseItem},
-    ledger_info::LedgerInfoWithSignatures,
     proof::SparseMerkleProof,
     proto::{
         account_state_blob::AccountStateWithProof,
@@ -36,7 +36,7 @@ use types::{
     },
     test_helpers::transaction_test_helpers::get_test_signed_txn,
     transaction::Version,
-    validator_change::ValidatorChangeEventWithProof,
+    vm_error::StatusCode,
 };
 
 /// This is a mock of the storage read client used in tests.
@@ -53,8 +53,8 @@ impl StorageRead for MockStorageReadClient {
         request_items: Vec<RequestItem>,
     ) -> Result<(
         Vec<ResponseItem>,
-        LedgerInfoWithSignatures<Ed25519Signature>,
-        Vec<ValidatorChangeEventWithProof<Ed25519Signature>>,
+        LedgerInfoWithSignatures,
+        Vec<ValidatorChangeEventWithProof>,
     )> {
         let request = types::get_with_proof::UpdateToLatestLedgerRequest::new(
             client_known_version,
@@ -80,8 +80,8 @@ impl StorageRead for MockStorageReadClient {
             dyn Future<
                     Output = Result<(
                         Vec<ResponseItem>,
-                        LedgerInfoWithSignatures<Ed25519Signature>,
-                        Vec<ValidatorChangeEventWithProof<Ed25519Signature>>,
+                        LedgerInfoWithSignatures,
+                        Vec<ValidatorChangeEventWithProof>,
                     )>,
                 > + Send,
         >,
@@ -140,6 +140,20 @@ impl StorageRead for MockStorageReadClient {
     ) -> Pin<Box<dyn Future<Output = Result<Option<StartupInfo>>> + Send>> {
         unimplemented!()
     }
+
+    fn get_latest_ledger_infos_per_epoch(
+        &self,
+        _start_epoch: u64,
+    ) -> Result<Vec<LedgerInfoWithSignatures>> {
+        unimplemented!()
+    }
+
+    fn get_latest_ledger_infos_per_epoch_async(
+        &self,
+        _start_epoch: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<LedgerInfoWithSignatures>>> + Send>> {
+        unimplemented!()
+    }
 }
 
 fn get_mock_update_to_latest_ledger(
@@ -174,6 +188,7 @@ fn get_mock_response_item(request_item: &ProtoRequestItem) -> Result<ProtoRespon
                     0,
                     types::byte_array::ByteArray::new(vec![]),
                     false,
+                    false,
                     EventHandle::random_handle(0),
                     EventHandle::random_handle(0),
                 );
@@ -192,6 +207,7 @@ fn get_mock_response_item(request_item: &ProtoRequestItem) -> Result<ProtoRespon
                         HashValue::zero(),
                         HashValue::zero(),
                         0,
+                        StatusCode::UNKNOWN_STATUS,
                     );
                     let transaction_info_to_account_proof = types::proof::SparseMerkleProof::new(None, vec![]);
                     types::proof::AccountStateProof::new(
@@ -270,5 +286,6 @@ fn get_transaction_info() -> types::transaction::TransactionInfo {
         HashValue::zero(),
         HashValue::zero(),
         0,
+        StatusCode::UNKNOWN_STATUS,
     )
 }

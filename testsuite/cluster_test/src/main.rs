@@ -3,29 +3,46 @@ use cluster_test::{
     aws::Aws,
     cluster::Cluster,
     deployment::{DeploymentManager, SOURCE_TAG, TESTED_TAG},
-    effects::{Effect, Reboot},
+    effects::{Action, Effect, Reboot, StopContainer},
     experiments::{Experiment, RebootRandomValidators},
     health::{DebugPortLogThread, HealthCheckRunner, LogTail},
+    log_prune::LogPruner,
     slack::SlackClient,
     suite::ExperimentSuite,
+    tx_emitter::TxEmitter,
 };
 use failure::{
     self,
     prelude::{bail, format_err},
 };
+use slog::{o, Drain};
+use slog_scope::info;
 use std::{
     collections::HashSet,
-    env,
+    env, mem,
     sync::mpsc::{self, TryRecvError},
     thread,
     time::{Duration, Instant},
 };
 use termion::{color, style};
+use threadpool;
 
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn main() {
+    setup_log();
     let matches = arg_matches();
+
+    if matches.is_present(ARG_PRUNE) {
+        let util = ClusterUtil::setup(&matches);
+        util.prune_logs();
+        return;
+    } else if matches.is_present(ARG_EMIT_TX) {
+        let util = ClusterUtil::setup(&matches);
+        util.emit_tx();
+        return;
+    }
+
     let mut runner = ClusterTestRunner::setup(&matches);
 
     if matches.is_present(ARG_RUN) {
@@ -38,10 +55,36 @@ pub fn main() {
     } else if matches.is_present(ARG_HEALTH_CHECK) {
         runner.run_health_check();
     } else if matches.is_present(ARG_WIPE_ALL_DB) {
-        runner.wipe_all_db();
+        runner.stop();
+        runner.wipe_all_db(true);
+        runner.start();
     } else if matches.is_present(ARG_REBOOT) {
-        runner.reboot(matches.values_of_lossy(ARG_REBOOT).unwrap());
+        runner.reboot();
+    } else if matches.is_present(ARG_RESTART) {
+        runner.restart();
+    } else if matches.is_present(ARG_STOP) {
+        runner.stop();
+    } else if matches.is_present(ARG_START) {
+        runner.start();
     }
+}
+
+fn setup_log() {
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", "info");
+    }
+    let decorator = slog_term::PlainDecorator::new(std::io::stdout());
+    let drain = slog_term::CompactFormat::new(decorator).build().fuse();
+    let drain = slog_envlogger::new(drain);
+    let drain = slog_async::Async::new(drain).build().fuse();
+    let logger = slog::Logger::root(drain, o!());
+    let logger_guard = slog_scope::set_global_logger(logger);
+    std::mem::forget(logger_guard);
+}
+
+struct ClusterUtil {
+    cluster: Cluster,
+    aws: Aws,
 }
 
 struct ClusterTestRunner {
@@ -51,10 +94,10 @@ struct ClusterTestRunner {
     deployment_manager: DeploymentManager,
     experiment_interval: Duration,
     slack: Option<SlackClient>,
+    thread_pool: threadpool::ThreadPool,
 }
 
-impl ClusterTestRunner {
-    /// Discovers cluster, setup log, etc
+impl ClusterUtil {
     pub fn setup(matches: &ArgMatches) -> Self {
         let workplace = matches
             .value_of(ARG_WORKPLACE)
@@ -66,11 +109,31 @@ impl ClusterTestRunner {
             None => cluster,
             Some(peers) => cluster.sub_cluster(peers),
         };
-        println!("Discovered {} peers", cluster.instances().len());
+        info!("Discovered {} peers", cluster.instances().len());
+        Self { cluster, aws }
+    }
+
+    pub fn prune_logs(&self) {
+        let log_prune = LogPruner::new(self.aws.clone());
+        log_prune.prune_logs();
+    }
+
+    pub fn emit_tx(self) {
+        let emitter = TxEmitter::new(&self.cluster);
+        emitter.run();
+    }
+}
+
+impl ClusterTestRunner {
+    /// Discovers cluster, setup log, etc
+    pub fn setup(matches: &ArgMatches) -> Self {
+        let util = ClusterUtil::setup(matches);
+        let cluster = util.cluster;
+        let aws = util.aws;
         let log_tail_started = Instant::now();
         let logs = DebugPortLogThread::spawn_new(&cluster);
         let log_tail_startup_time = Instant::now() - log_tail_started;
-        println!(
+        info!(
             "Log tail thread started in {} ms",
             log_tail_startup_time.as_millis()
         );
@@ -82,6 +145,10 @@ impl ClusterTestRunner {
         let experiment_interval = Duration::from_secs(experiment_interval_sec);
         let deployment_manager = DeploymentManager::new(aws.clone(), cluster.clone());
         let slack = SlackClient::try_new_from_environment();
+        let thread_pool = threadpool::Builder::new()
+            .num_threads(10)
+            .thread_name("ssh-pool".to_string())
+            .build();
         Self {
             logs,
             cluster,
@@ -89,6 +156,7 @@ impl ClusterTestRunner {
             deployment_manager,
             experiment_interval,
             slack,
+            thread_pool,
         }
     }
 
@@ -96,7 +164,7 @@ impl ClusterTestRunner {
         let mut hash_to_tag = None;
         loop {
             if let Some(hash) = self.deployment_manager.latest_hash_changed() {
-                println!(
+                info!(
                     "New version of `{}` tag is available: `{}`",
                     SOURCE_TAG, hash
                 );
@@ -121,7 +189,7 @@ impl ClusterTestRunner {
                 return;
             }
             if let Some(hash_to_tag) = hash_to_tag.take() {
-                println!("Test suite succeed first time for `{}`", hash_to_tag);
+                info!("Test suite succeed first time for `{}`", hash_to_tag);
                 if let Err(e) = self
                     .deployment_manager
                     .tag_tested_image(hash_to_tag.clone())
@@ -143,18 +211,29 @@ impl ClusterTestRunner {
     }
 
     fn redeploy(&mut self, hash: String) -> failure::Result<bool> {
-        if !self.deployment_manager.redeploy(hash) {
+        if env::var("ALLOW_DEPLOY") != Ok("yes".to_string()) {
+            info!("Deploying is disabled. Run with ALLOW_DEPLOY=yes to enable deploy");
             return Ok(false);
         }
-        println!("Waiting for 60 seconds to allow ECS to restart tasks...");
+        self.stop();
+        if env::var("WIPE_ON_DEPLOY") != Ok("no".to_string()) {
+            info!("Wiping validators");
+            self.wipe_all_db(false);
+        } else {
+            info!("WIPE_ON_DEPLOY is set to no, keeping database");
+        }
+        self.deployment_manager.redeploy(hash)?;
         thread::sleep(Duration::from_secs(60));
-        println!("Waiting until all validators healthy after deployment");
+        self.logs.recv_all();
+        self.health_check_runner.clear();
+        self.start();
+        info!("Waiting until all validators healthy after deployment");
         self.wait_until_all_healthy()?;
         Ok(true)
     }
 
     fn run_suite(&mut self, suite: ExperimentSuite) -> failure::Result<()> {
-        println!("Starting suite");
+        info!("Starting suite");
         let suite_started = Instant::now();
         for experiment in suite.experiments {
             let experiment_name = format!("{}", experiment);
@@ -163,7 +242,7 @@ impl ClusterTestRunner {
             })?;
             thread::sleep(self.experiment_interval);
         }
-        println!(
+        info!(
             "Suite completed in {:?}",
             Instant::now().duration_since(suite_started)
         );
@@ -179,7 +258,7 @@ impl ClusterTestRunner {
             bail!("Some validators are unhealthy before experiment started");
         }
 
-        println!(
+        info!(
             "{}Starting experiment {}{}{}{}",
             style::Bold,
             color::Fg(color::Blue),
@@ -231,7 +310,7 @@ impl ClusterTestRunner {
             }
         }
 
-        println!(
+        info!(
             "{}Experiment finished, waiting until all affected validators recover{}",
             style::Bold,
             style::Reset
@@ -266,7 +345,7 @@ impl ClusterTestRunner {
             }
         }
 
-        println!("Experiment completed");
+        info!("Experiment completed");
         Ok(())
     }
 
@@ -302,57 +381,151 @@ impl ClusterTestRunner {
 
     fn tail_logs(self) {
         for log in self.logs.event_receiver {
-            println!("{:?}", log);
+            info!("{:?}", log);
         }
     }
 
     fn slack_message(&self, msg: String) {
-        println!("{}", msg);
+        info!("{}", msg);
         if let Some(ref slack) = self.slack {
             if let Err(e) = slack.send_message(&msg) {
-                println!("Failed to send slack message: {}", e);
+                info!("Failed to send slack message: {}", e);
             }
         }
     }
 
-    fn wipe_all_db(self) {
-        println!("Going to wipe db on all validators in cluster!");
-        println!("Waiting 10 seconds before proceed");
-        thread::sleep(Duration::from_secs(10));
-        println!("Starting...");
-        for instance in self.cluster.instances() {
-            if let Err(e) = instance.run_cmd_tee_err(vec!["sudo", "rm", "-rf", "/data/libra/"]) {
-                println!("Failed to wipe {}: {:?}", instance, e);
-            }
+    fn wipe_all_db(&self, safety_wait: bool) {
+        info!("Going to wipe db on all validators in cluster!");
+        if safety_wait {
+            info!("Waiting 10 seconds before proceed");
+            thread::sleep(Duration::from_secs(10));
+            info!("Starting...");
         }
-        println!("Done");
-    }
-
-    fn reboot(self, validators: Vec<String>) {
-        let mut reboots = vec![];
-        for validator in validators {
-            match self.cluster.get_instance(&validator) {
-                None => println!("{} not found", validator),
-                Some(instance) => {
-                    println!("Rebooting {}", validator);
-                    let reboot = Reboot::new(instance.clone());
-                    if let Err(err) = reboot.apply() {
-                        println!("Failed to reboot {}: {:?}", validator, err);
-                    } else {
-                        reboots.push(reboot);
+        let jobs = self
+            .cluster
+            .instances()
+            .iter()
+            .map(|instance| {
+                let instance = instance.clone();
+                move || {
+                    if let Err(e) =
+                        instance.run_cmd_tee_err(vec!["sudo", "rm", "-rf", "/data/libra/"])
+                    {
+                        info!("Failed to wipe {}: {:?}", instance, e);
                     }
                 }
+            })
+            .collect();
+        self.execute_jobs(jobs);
+        info!("Done");
+    }
+
+    fn reboot(self) {
+        let mut reboots = vec![];
+        for instance in self.cluster.instances() {
+            info!("Rebooting {}", instance);
+            let reboot = Reboot::new(instance.clone());
+            if let Err(err) = reboot.apply() {
+                info!("Failed to reboot {}: {:?}", instance, err);
+            } else {
+                reboots.push(reboot);
             }
         }
-        println!("Waiting to complete");
+        info!("Waiting to complete");
         while reboots.iter().any(|r| !r.is_complete()) {
             thread::sleep(Duration::from_secs(5));
         }
-        println!("Completed");
+        info!("Completed");
+    }
+
+    fn restart(&self) {
+        self.stop();
+        self.start();
+        info!("Completed");
+    }
+
+    pub fn stop(&self) {
+        self.activate_all(&self.make_stop_effects())
+    }
+
+    pub fn start(&self) {
+        self.deactivate_all(&self.make_stop_effects())
+    }
+
+    fn make_stop_effects(&self) -> Vec<StopContainer> {
+        self.cluster
+            .instances()
+            .clone()
+            .into_iter()
+            .map(StopContainer::new)
+            .collect()
+    }
+
+    fn activate_all<T: Effect>(&self, effects: &[T]) {
+        let jobs = effects
+            .iter()
+            .map(|effect| {
+                move || {
+                    if let Err(e) = effect.activate() {
+                        info!("Failed to activate {}: {:?}", effect, e);
+                    }
+                }
+            })
+            .collect();
+        self.execute_jobs(jobs);
+    }
+
+    fn deactivate_all<T: Effect>(&self, effects: &[T]) {
+        let jobs = effects
+            .iter()
+            .map(|effect| {
+                move || {
+                    if let Err(e) = effect.deactivate() {
+                        info!("Failed to deactivate {}: {:?}", effect, e);
+                    }
+                }
+            })
+            .collect();
+        self.execute_jobs(jobs);
+    }
+
+    /// Executes jobs, wait for them to complete and return results
+    /// Note: Results in vector do not match order of input jobs
+    fn execute_jobs<'a, R, J>(&self, jobs: Vec<J>) -> Vec<R>
+    where
+        R: Send + 'a,
+        J: FnOnce() -> R + Send + 'a,
+    {
+        let (sender, recv) = mpsc::channel();
+        let size = jobs.len();
+        for job in jobs {
+            let sender = sender.clone();
+            let closure = move || {
+                let r = job();
+                sender
+                    .send(r)
+                    .expect("main execute_jobs thread terminated before worker");
+            };
+            let closure: Box<dyn FnOnce() + Send + 'a> = Box::new(closure);
+            // Using mem::transmute to cast from 'a to 'static lifetime
+            // This is safe because we ensure lifetime of current stack frame
+            // is longer then lifetime of closure
+            // Even if one of worker threads panics, we still going to wait in recv loop below
+            // until every single thread completes
+            let closure: Box<dyn FnOnce() + Send + 'static> = unsafe { mem::transmute(closure) };
+            self.thread_pool.execute(closure);
+        }
+        let mut result = Vec::with_capacity(size);
+        for _ in 0..size {
+            let r = recv.recv().expect("One of job threads had panic");
+            result.push(r);
+        }
+        result
     }
 }
 
 const ARG_WORKPLACE: &str = "workplace";
+const ARG_PEERS: &str = "peers";
 // Actions:
 const ARG_TAIL_LOGS: &str = "tail-logs";
 const ARG_HEALTH_CHECK: &str = "health-check";
@@ -360,7 +533,11 @@ const ARG_RUN: &str = "run";
 const ARG_RUN_ONCE: &str = "run-once";
 const ARG_WIPE_ALL_DB: &str = "wipe-all-db";
 const ARG_REBOOT: &str = "reboot";
-const ARG_PEERS: &str = "peers";
+const ARG_STOP: &str = "stop";
+const ARG_START: &str = "start";
+const ARG_RESTART: &str = "restart";
+const ARG_EMIT_TX: &str = "emit-tx";
+const ARG_PRUNE: &str = "prune-logs";
 
 fn arg_matches() -> ArgMatches<'static> {
     // Parameters
@@ -373,17 +550,20 @@ fn arg_matches() -> ArgMatches<'static> {
         .long("--peers")
         .short("-p")
         .takes_value(true)
-        .use_delimiter(true);
+        .use_delimiter(true)
+        .conflicts_with(ARG_PRUNE);
     // Actions
     let wipe_all_db = Arg::with_name(ARG_WIPE_ALL_DB).long("--wipe-all-db");
     let run = Arg::with_name(ARG_RUN).long("--run");
     let run_once = Arg::with_name(ARG_RUN_ONCE).long("--run-once");
     let tail_logs = Arg::with_name(ARG_TAIL_LOGS).long("--tail-logs");
     let health_check = Arg::with_name(ARG_HEALTH_CHECK).long("--health-check");
-    let reboot = Arg::with_name(ARG_REBOOT)
-        .long("--reboot")
-        .takes_value(true)
-        .use_delimiter(true);
+    let prune_logs = Arg::with_name(ARG_PRUNE).long("--prune-logs");
+    let reboot = Arg::with_name(ARG_REBOOT).long("--reboot");
+    let restart = Arg::with_name(ARG_RESTART).long("--restart");
+    let stop = Arg::with_name(ARG_STOP).long("--stop");
+    let start = Arg::with_name(ARG_START).long("--start");
+    let emit_tx = Arg::with_name(ARG_EMIT_TX).long("--emit-tx");
     // This grouping requires one and only one action (tail logs, run test, etc)
     let action_group = ArgGroup::with_name("action")
         .args(&[
@@ -393,6 +573,11 @@ fn arg_matches() -> ArgMatches<'static> {
             ARG_HEALTH_CHECK,
             ARG_WIPE_ALL_DB,
             ARG_REBOOT,
+            ARG_RESTART,
+            ARG_STOP,
+            ARG_START,
+            ARG_EMIT_TX,
+            ARG_PRUNE,
         ])
         .required(true);
     App::new("cluster_test")
@@ -409,6 +594,11 @@ fn arg_matches() -> ArgMatches<'static> {
             health_check,
             wipe_all_db,
             reboot,
+            restart,
+            stop,
+            start,
+            prune_logs,
+            emit_tx,
         ])
         .get_matches()
 }

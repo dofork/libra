@@ -12,12 +12,8 @@ pub use proto_conv::{FromProtoBytes, IntoProtoBytes};
 use serde::{Deserialize, Serialize};
 pub use types::{
     account_address::AccountAddress,
-    transaction::{
-        Program, RawTransaction, RawTransactionBytes, TransactionArgument, TransactionPayload,
-    },
+    transaction::{RawTransaction, TransactionArgument, TransactionPayload},
 };
-pub use vm_genesis;
-
 pub(crate) mod account_commands;
 /// Main instance of client holding corresponding information, e.g. account address.
 pub mod client_proxy;
@@ -63,19 +59,16 @@ pub enum AccountStatus {
 impl AccountData {
     /// Serialize account keypair if exists.
     pub fn keypair_as_string(&self) -> Option<(String, String)> {
-        match &self.key_pair {
-            Some(key_pair) => {
-                let private_key_string = key_pair
-                    .private_key
-                    .to_encoded_string()
-                    .expect("Account private key to convertible to string!");
-                let public_key_string = key_pair
-                    .public_key
-                    .to_encoded_string()
-                    .expect("Account public Key not convertible to string!");
-                Some((private_key_string, public_key_string))
-            }
-            None => None,
-        }
+        self.key_pair.as_ref().and_then(|key_pair| {
+            let private_key_string = key_pair
+                .private_key
+                .to_encoded_string()
+                .expect("Account private key to convertible to string!");
+            let public_key_string = key_pair
+                .public_key
+                .to_encoded_string()
+                .expect("Account public Key not convertible to string!");
+            Some((private_key_string, public_key_string))
+        })
     }
 }

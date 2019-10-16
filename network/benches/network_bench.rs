@@ -1,7 +1,6 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#![feature(async_await)]
 // Allow KiB, MiB consts
 #![allow(non_upper_case_globals, non_snake_case)]
 // Allow fns to take &usize, since criterion only passes parameters by ref
@@ -76,14 +75,14 @@ fn direct_send_bench(b: &mut Bencher, msg_len: &usize) {
         (
             dialer_peer_id,
             NetworkPublicKeys {
-                signing_public_key: dialer_signing_public_key.clone().into(),
+                signing_public_key: dialer_signing_public_key.clone(),
                 identity_public_key: dialer_identity_public_key.clone(),
             },
         ),
         (
             listener_peer_id,
             NetworkPublicKeys {
-                signing_public_key: listener_signing_public_key.clone().into(),
+                signing_public_key: listener_signing_public_key.clone(),
                 identity_public_key: listener_identity_public_key.clone(),
             },
         ),
@@ -98,9 +97,11 @@ fn direct_send_bench(b: &mut Bencher, msg_len: &usize) {
         listener_addr,
         RoleType::Validator,
     )
-    .transport(TransportType::TcpNoise)
+    .transport(TransportType::TcpNoise(Some((
+        listener_identity_private_key,
+        listener_identity_public_key,
+    ))))
     .trusted_peers(trusted_peers.clone())
-    .identity_keys((listener_identity_private_key, listener_identity_public_key))
     .signing_keys((listener_signing_private_key, listener_signing_public_key))
     .discovery_interval_ms(HOUR_IN_MS)
     .direct_send_protocols(vec![ProtocolId::from_static(
@@ -122,9 +123,11 @@ fn direct_send_bench(b: &mut Bencher, msg_len: &usize) {
         dialer_addr,
         RoleType::Validator,
     )
-    .transport(TransportType::TcpNoise)
+    .transport(TransportType::TcpNoise(Some((
+        dialer_identity_private_key,
+        dialer_identity_public_key,
+    ))))
     .trusted_peers(trusted_peers.clone())
-    .identity_keys((dialer_identity_private_key, dialer_identity_public_key))
     .signing_keys((dialer_signing_private_key, dialer_signing_public_key))
     .seed_peers(
         [(listener_peer_id, vec![listen_addr])]
@@ -219,14 +222,14 @@ fn rpc_bench(b: &mut Bencher, msg_len: &usize) {
         (
             dialer_peer_id,
             NetworkPublicKeys {
-                signing_public_key: dialer_signing_public_key.clone().into(),
+                signing_public_key: dialer_signing_public_key.clone(),
                 identity_public_key: dialer_identity_public_key.clone(),
             },
         ),
         (
             listener_peer_id,
             NetworkPublicKeys {
-                signing_public_key: listener_signing_public_key.clone().into(),
+                signing_public_key: listener_signing_public_key.clone(),
                 identity_public_key: listener_identity_public_key.clone(),
             },
         ),
@@ -241,9 +244,11 @@ fn rpc_bench(b: &mut Bencher, msg_len: &usize) {
         listener_addr,
         RoleType::Validator,
     )
-    .transport(TransportType::TcpNoise)
+    .transport(TransportType::TcpNoise(Some((
+        listener_identity_private_key,
+        listener_identity_public_key,
+    ))))
     .trusted_peers(trusted_peers.clone())
-    .identity_keys((listener_identity_private_key, listener_identity_public_key))
     .signing_keys((listener_signing_private_key, listener_signing_public_key))
     .discovery_interval_ms(HOUR_IN_MS)
     .rpc_protocols(vec![ProtocolId::from_static(CONSENSUS_RPC_PROTOCOL)])
@@ -261,9 +266,11 @@ fn rpc_bench(b: &mut Bencher, msg_len: &usize) {
         dialer_addr,
         RoleType::Validator,
     )
-    .transport(TransportType::TcpNoise)
+    .transport(TransportType::TcpNoise(Some((
+        dialer_identity_private_key,
+        dialer_identity_public_key,
+    ))))
     .trusted_peers(trusted_peers.clone())
-    .identity_keys((dialer_identity_private_key, dialer_identity_public_key))
     .signing_keys((dialer_signing_private_key, dialer_signing_public_key))
     .seed_peers(
         [(listener_peer_id, vec![listen_addr])]

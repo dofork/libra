@@ -4,8 +4,9 @@
 use crate::{
     account_address::AccountAddress,
     proto::transaction::SignedTransaction as ProtoSignedTransaction,
-    transaction::{Program, RawTransaction, RawTransactionBytes, SignedTransaction},
+    transaction::{RawTransaction, SignedTransaction, TransactionPayload},
 };
+use canonical_serialization::SimpleDeserializer;
 use chrono::Utc;
 use crypto::{
     ed25519::*,
@@ -15,21 +16,22 @@ use crypto::{
     HashValue,
 };
 use failure::prelude::*;
-use proto_conv::IntoProto;
-use protobuf::Message;
 
 /// Used to get the digest of a set of signed transactions.  This is used by a validator
 /// to sign a block and to verify the signatures of other validators on a block
 pub fn get_signed_transactions_digest(signed_txns: &[ProtoSignedTransaction]) -> HashValue {
     let mut signatures = vec![];
     for transaction in signed_txns {
-        signatures.extend_from_slice(&transaction.sender_signature);
+        let signed_txn: SignedTransaction =
+            SimpleDeserializer::deserialize(&transaction.signed_txn)
+                .expect("Unable to deserialize SignedTransaction");
+        signatures.extend_from_slice(&signed_txn.signature().to_bytes());
     }
     signatures.test_only_hash()
 }
 
 pub fn create_unsigned_txn(
-    program: Program,
+    payload: TransactionPayload,
     sender_address: AccountAddress,
     sender_sequence_number: u64,
     max_gas_amount: u64,
@@ -39,7 +41,7 @@ pub fn create_unsigned_txn(
     RawTransaction::new(
         sender_address,
         sender_sequence_number,
-        program,
+        payload,
         max_gas_amount,
         gas_unit_price,
         std::time::Duration::new((Utc::now().timestamp() + txn_expiration) as u64, 0),
@@ -53,7 +55,7 @@ pub trait TransactionSigner {
 /// Craft a transaction request.
 pub fn create_signed_txn<T: TransactionSigner + ?Sized>(
     signer: &T,
-    program: Program,
+    payload: TransactionPayload,
     sender_address: AccountAddress,
     sender_sequence_number: u64,
     max_gas_amount: u64,
@@ -61,7 +63,7 @@ pub fn create_signed_txn<T: TransactionSigner + ?Sized>(
     txn_expiration: i64, // for compatibility with UTC's timestamp.
 ) -> Result<SignedTransaction> {
     let raw_txn = create_unsigned_txn(
-        program,
+        payload,
         sender_address,
         sender_sequence_number,
         max_gas_amount,
@@ -73,10 +75,8 @@ pub fn create_signed_txn<T: TransactionSigner + ?Sized>(
 
 impl TransactionSigner for KeyPair<Ed25519PrivateKey, Ed25519PublicKey> {
     fn sign_txn(&self, raw_txn: RawTransaction) -> failure::prelude::Result<SignedTransaction> {
-        let bytes = raw_txn.clone().into_proto().write_to_bytes()?;
-        let hash = RawTransactionBytes(&bytes).hash();
-        let signature = self.private_key.sign_message(&hash);
-        Ok(SignedTransaction::craft_signed_transaction_for_client(
+        let signature = self.private_key.sign_message(&raw_txn.hash());
+        Ok(SignedTransaction::new(
             raw_txn,
             self.public_key.clone(),
             signature,

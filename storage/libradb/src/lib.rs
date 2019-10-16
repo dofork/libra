@@ -40,7 +40,7 @@ use crate::{
     system_store::SystemStore,
     transaction_store::TransactionStore,
 };
-use crypto::{ed25519::*, hash::CryptoHash, HashValue};
+use crypto::hash::{CryptoHash, HashValue};
 use failure::prelude::*;
 use itertools::{izip, zip_eq};
 use lazy_static::lazy_static;
@@ -52,17 +52,16 @@ use storage_proto::StartupInfo;
 use types::{
     access_path::AccessPath,
     account_address::AccountAddress,
-    account_config::{get_account_resource_or_default, AccountResource},
+    account_config::AccountResource,
     account_state_blob::{AccountStateBlob, AccountStateWithProof},
     contract_event::EventWithProof,
+    crypto_proxies::{LedgerInfoWithSignatures, ValidatorChangeEventWithProof},
     get_with_proof::{RequestItem, ResponseItem},
-    ledger_info::LedgerInfoWithSignatures,
     proof::{AccountStateProof, EventProof, SignedTransactionProof, SparseMerkleProof},
     transaction::{
         SignedTransactionWithProof, TransactionInfo, TransactionListWithProof, TransactionToCommit,
         Version,
     },
-    validator_change::ValidatorChangeEventWithProof,
 };
 
 lazy_static! {
@@ -94,7 +93,7 @@ pub struct LibraDB {
 
 impl LibraDB {
     /// Config parameter for the pruner.
-    const NUM_HISTORICAL_VERSIONS_TO_KEEP: u64 = u64::max_value();
+    const NUM_HISTORICAL_VERSIONS_TO_KEEP: u64 = 1_000_000;
 
     /// This creates an empty LibraDB instance on disk or opens one if it already exists.
     pub fn new<P: AsRef<Path> + Clone>(db_root_path: P) -> Self {
@@ -115,6 +114,10 @@ impl LibraDB {
             (SIGNED_TRANSACTION_CF_NAME, ColumnFamilyOptions::default()),
             (
                 TRANSACTION_ACCUMULATOR_CF_NAME,
+                ColumnFamilyOptions::default(),
+            ),
+            (
+                TRANSACTION_BY_ACCOUNT_CF_NAME,
                 ColumnFamilyOptions::default(),
             ),
             (TRANSACTION_INFO_CF_NAME, ColumnFamilyOptions::default()),
@@ -188,7 +191,7 @@ impl LibraDB {
     /// `start_seq_num`, `ascending` and `limit`. If ascending is true this query will return up to
     /// `limit` events that were emitted after `start_event_seq_num`. Otherwise, it will return up
     /// to `limit` events in the reverse order. Both cases are inclusive.
-    fn get_events_by_event_access_path(
+    fn get_events_by_query_path(
         &self,
         query_path: &AccessPath,
         start_seq_num: u64,
@@ -207,7 +210,7 @@ impl LibraDB {
             bail!("Nothing stored under address: {}", query_path.address);
         };
         let event_key = account_resource
-            .get_event_handle_by_query_path(query_path)?
+            .get_event_handle_by_query_path(&query_path.path)?
             .key();
         let cursor = if get_latest {
             // Caller wants the latest, figure out the latest seq_num.
@@ -274,43 +277,17 @@ impl LibraDB {
 
     /// Returns a signed transaction that is the `seq_num`-th one associated with the given account.
     /// If the signed transaction with given `seq_num` doesn't exist, returns `None`.
-    // TODO(gzh): Use binary search for now. We may create seq_num index in the future.
-    fn get_txn_by_account_and_seq(
+    fn get_txn_by_account(
         &self,
         address: AccountAddress,
         seq_num: u64,
         ledger_version: Version,
         fetch_events: bool,
     ) -> Result<Option<SignedTransactionWithProof>> {
-        // If txn with seq_num n is at some version, the corresponding account state at the
-        // same version will be the first account state that has seq_num n + 1.
-        let seq_num = seq_num + 1;
-        let (mut start_version, mut end_version) = (0, ledger_version);
-        while start_version < end_version {
-            let mid_version = start_version + (end_version - start_version) / 2;
-            let account_seq_num = self.get_account_seq_num_by_version(address, mid_version)?;
-            if account_seq_num >= seq_num {
-                end_version = mid_version;
-            } else {
-                start_version = mid_version + 1;
-            }
-        }
-        assert_eq!(start_version, end_version);
-
-        let seq_num_found = self.get_account_seq_num_by_version(address, start_version)?;
-        if seq_num_found < seq_num {
-            return Ok(None);
-        } else if seq_num_found > seq_num {
-            // log error
-            bail!("internal error: seq_num is not continuous.")
-        }
-        // start_version cannot be 0 (genesis version).
-        assert_eq!(
-            self.get_account_seq_num_by_version(address, start_version - 1)?,
-            seq_num_found - 1
-        );
-        self.get_transaction_with_proof(start_version, ledger_version, fetch_events)
-            .map(Some)
+        self.transaction_store
+            .lookup_transaction_by_account(address, seq_num, ledger_version)?
+            .map(|version| self.get_transaction_with_proof(version, ledger_version, fetch_events))
+            .transpose()
     }
 
     /// Gets the latest version number available in the ledger.
@@ -320,6 +297,20 @@ impl LibraDB {
             .get_latest_ledger_info()?
             .ledger_info()
             .version())
+    }
+
+    /// Returns the latest ledger infos per epoch starting with the given epoch num:
+    /// - the latest ledger info of the current epoch is just the last ledger info in the system
+    /// - the latest ledger infos of previous epochs contain reconfiguration validator sets.
+    /// Returns error in case `start_epoch` is higher than the currently known epoch.
+    /// The returned vector is not necessarily sorted: the client should make sure to sort it
+    /// by epoch number.
+    pub fn get_latest_ledger_infos_per_epoch(
+        &self,
+        start_epoch: u64,
+    ) -> Result<Vec<LedgerInfoWithSignatures>> {
+        self.ledger_store
+            .get_latest_ledger_infos_per_epoch(start_epoch)
     }
 
     /// Persist transactions. Called by the executor module when either syncing nodes or committing
@@ -334,7 +325,7 @@ impl LibraDB {
         &self,
         txns_to_commit: &[TransactionToCommit],
         first_version: Version,
-        ledger_info_with_sigs: &Option<LedgerInfoWithSignatures<Ed25519Signature>>,
+        ledger_info_with_sigs: &Option<LedgerInfoWithSignatures>,
     ) -> Result<()> {
         let num_txns = txns_to_commit.len() as u64;
         // ledger_info_with_sigs could be None if we are doing state synchronization. In this case
@@ -432,7 +423,9 @@ impl LibraDB {
 
         // Transaction accumulator updates. Get result root hash.
         let txn_infos = izip!(txns_to_commit, state_root_hashes, event_root_hashes)
-            .map(|(t, s, e)| TransactionInfo::new(t.signed_txn().hash(), s, e, t.gas_used()))
+            .map(|(t, s, e)| {
+                TransactionInfo::new(t.signed_txn().hash(), s, e, t.gas_used(), t.major_status())
+            })
             .collect::<Vec<_>>();
         assert_eq!(txn_infos.len(), txns_to_commit.len());
 
@@ -452,8 +445,8 @@ impl LibraDB {
         request_items: Vec<RequestItem>,
     ) -> Result<(
         Vec<ResponseItem>,
-        LedgerInfoWithSignatures<Ed25519Signature>,
-        Vec<ValidatorChangeEventWithProof<Ed25519Signature>>,
+        LedgerInfoWithSignatures,
+        Vec<ValidatorChangeEventWithProof>,
     )> {
         error_if_too_many_requested(request_items.len() as u64, MAX_REQUEST_ITEMS)?;
 
@@ -477,7 +470,7 @@ impl LibraDB {
                     sequence_number,
                     fetch_events,
                 } => {
-                    let signed_transaction_with_proof = self.get_txn_by_account_and_seq(
+                    let signed_transaction_with_proof = self.get_txn_by_account(
                         account,
                         sequence_number,
                         ledger_version,
@@ -506,7 +499,7 @@ impl LibraDB {
                     limit,
                 } => {
                     let (events_with_proof, proof_of_latest_event) = self
-                        .get_events_by_event_access_path(
+                        .get_events_by_query_path(
                             &access_path,
                             start_event_seq_num,
                             ascending,
@@ -602,7 +595,6 @@ impl LibraDB {
 
         let limit = std::cmp::min(limit, ledger_version - start_version + 1);
         let txn_and_txn_info_list = (start_version..start_version + limit)
-            .into_iter()
             .map(|version| {
                 Ok((
                     self.transaction_store.get_transaction(version)?,
@@ -625,7 +617,6 @@ impl LibraDB {
         let events = if fetch_events {
             Some(
                 (start_version..start_version + limit)
-                    .into_iter()
                     .map(|version| Ok(self.event_store.get_events_by_version(version)?))
                     .collect::<Result<Vec<_>>>()?,
             )
@@ -687,19 +678,6 @@ impl LibraDB {
         }
 
         Ok(())
-    }
-
-    fn get_account_seq_num_by_version(
-        &self,
-        address: AccountAddress,
-        version: Version,
-    ) -> Result<u64> {
-        let (account_state_blob, _proof) = self
-            .state_store
-            .get_account_state_with_proof_by_version(address, version)?;
-
-        // If an account does not exist, we treat it as if it has sequence number 0.
-        Ok(get_account_resource_or_default(&account_state_blob)?.sequence_number())
     }
 
     fn get_transaction_with_proof(

@@ -141,7 +141,7 @@ impl<PublicKey: VerifyingKey> ValidatorVerifier<PublicKey> {
                     let sig: PublicKey::SignatureMaterial = signature.clone().into();
                     self.author_to_public_keys
                         .get(&author)
-                        .and_then(|pub_key| Some((pub_key.clone(), sig)))
+                        .map(|pub_key| (pub_key.clone(), sig))
                 })
                 .collect();
         // Fallback is required to identify the source of the problem if batching fails.
@@ -192,12 +192,14 @@ impl<PublicKey: VerifyingKey> ValidatorVerifier<PublicKey> {
     where
         T: Into<PublicKey::SignatureMaterial> + Clone,
     {
-        for author in aggregated_signature.keys() {
-            if self.author_to_public_keys.get(&author) == None {
-                return Err(VerifyError::UnknownAuthor);
-            }
+        if aggregated_signature
+            .keys()
+            .all(|author| self.author_to_public_keys.get(&author).is_some())
+        {
+            Ok(())
+        } else {
+            Err(VerifyError::UnknownAuthor)
         }
-        Ok(())
     }
 
     /// Return the public key for this address.
@@ -287,7 +289,7 @@ mod tests {
         for validator in validator_signers.iter() {
             author_to_signature_map.insert(
                 validator.author(),
-                validator.sign_message(random_hash).unwrap().into(),
+                validator.sign_message(random_hash).unwrap(),
             );
         }
 

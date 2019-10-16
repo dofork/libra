@@ -14,18 +14,20 @@ use std::collections::HashMap;
 use types::{
     account_address::{AccountAddress, ADDRESS_LENGTH},
     byte_array::ByteArray,
+    identifier::Identifier,
     language_storage::ModuleId,
 };
 use vm::{
     access::*,
-    assert_ok,
     file_format::{
         AddressPoolIndex, ByteArrayPoolIndex, Bytecode, CodeOffset, FieldDefinitionIndex,
-        FunctionDefinition, FunctionDefinitionIndex, FunctionHandleIndex, LocalIndex, MemberCount,
-        ModuleHandle, SignatureToken, StringPoolIndex, StructDefinition, StructDefinitionIndex,
-        StructFieldInformation, StructHandleIndex, TableIndex, NO_TYPE_ACTUALS,
+        FunctionDefinition, FunctionDefinitionIndex, FunctionHandleIndex, FunctionSignature,
+        LocalIndex, MemberCount, ModuleHandle, SignatureToken, StructDefinition,
+        StructDefinitionIndex, StructFieldInformation, StructHandleIndex, TableIndex,
+        UserStringIndex, NO_TYPE_ACTUALS,
     },
     gas_schedule::{AbstractMemorySize, GasAlgebra, GasCarrier},
+    vm_string::VMString,
 };
 use vm_runtime::{
     code_cache::module_cache::ModuleCache, execution_stack::ExecutionStack,
@@ -56,7 +58,7 @@ pub struct StackState<'txn> {
 
     /// A sparse mapping of local index to local value for the current function frame. This will
     /// be applied to the execution stack later on in the `stack_transition_function`.
-    pub local_mapping: HashMap<LocalIndex, Local>,
+    pub local_mapping: HashMap<LocalIndex, Value>,
 }
 
 impl<'txn> StackState<'txn> {
@@ -66,7 +68,7 @@ impl<'txn> StackState<'txn> {
         stack: Stack,
         instr: Bytecode,
         size: AbstractMemorySize<GasCarrier>,
-        local_mapping: HashMap<LocalIndex, Local>,
+        local_mapping: HashMap<LocalIndex, Value>,
     ) -> Self {
         Self {
             module_info,
@@ -110,8 +112,8 @@ where
     /// The maximum size of the generated value stack.
     max_stack_size: u64,
 
-    /// Cursor into the string pool. Used for the generation of random strings.
-    string_pool_index: TableIndex,
+    /// Cursor into the user string pool. Used for the generation of random user strings.
+    user_string_index: TableIndex,
 
     /// Cursor into the address pool. Used for the generation of random addresses.  We use this
     /// since we need the addresses to be unique for e.g. CreateAccount, and we don't want a
@@ -122,11 +124,11 @@ where
     /// generating an inhabitant for a struct SignatureToken. This is lazily populated.
     /// NB: The `StructDefinitionIndex`s in this table are w.r.t. the module that is given by the
     /// `ModuleId` and _not_ the `root_module`.
-    struct_handle_table: HashMap<ModuleId, HashMap<String, StructDefinitionIndex>>,
+    struct_handle_table: HashMap<ModuleId, HashMap<Identifier, StructDefinitionIndex>>,
 
     /// A reverse lookup table for each code module that allows us to resolve function handles to
     /// function definitions. Also lazily populated.
-    function_handle_table: HashMap<ModuleId, HashMap<String, FunctionDefinitionIndex>>,
+    function_handle_table: HashMap<ModuleId, HashMap<Identifier, FunctionDefinitionIndex>>,
 }
 
 impl<'alloc, 'txn> RandomStackGenerator<'alloc, 'txn>
@@ -154,7 +156,7 @@ where
             root_module,
             module_cache,
             iters,
-            string_pool_index: iters,
+            user_string_index: iters,
             address_pool_index: iters,
             struct_handle_table: HashMap::new(),
             function_handle_table: HashMap::new(),
@@ -163,8 +165,8 @@ where
 
     fn to_module_id(&self, module_handle: &ModuleHandle) -> ModuleId {
         let address = *self.root_module.address_at(module_handle.address);
-        let name = self.root_module.string_at(module_handle.name);
-        ModuleId::new(address, name.to_string())
+        let name = self.root_module.identifier_at(module_handle.name);
+        ModuleId::new(address, name.into())
     }
 
     // Determines if the instruction gets its type/instruction info from the stack type
@@ -174,7 +176,8 @@ where
         match self.op {
             MoveToSender(_, _)
             | MoveFrom(_, _)
-            | BorrowGlobal(_, _)
+            | ImmBorrowGlobal(_, _)
+            | MutBorrowGlobal(_, _)
             | Exists(_, _)
             | Unpack(_, _)
             | Pack(_, _)
@@ -195,14 +198,12 @@ where
         }
     }
 
-    fn next_int(&mut self, stk: &[Local]) -> u64 {
+    fn next_int(&mut self, stk: &[Value]) -> u64 {
         if self.op == Bytecode::Sub && !stk.is_empty() {
             let peek: Option<u64> = stk
                 .last()
                 .expect("[Next Integer] The impossible happened: the value stack became empty while still full.")
                 .clone()
-                .value()
-                .expect("[Next Integer] Invalid integer stack value encountered when peeking at the generated stack.")
                 .into();
             self.gen.gen_range(
                 0,
@@ -229,19 +230,22 @@ where
     // at least `self.iters` number of strings and addresses. In the case where we are just padding
     // the stack, or where the instructions semantics don't require having an address in the
     // address pool, we don't waste our pools and generate a random value.
-    fn next_str(&mut self, is_padding: bool) -> String {
+    fn next_vm_string(&mut self, is_padding: bool) -> VMString {
         if !self.points_to_module_data() || is_padding {
             let len: usize = self.gen.gen_range(1, MAX_STRING_SIZE);
-            (0..len).map(|_| self.gen.gen::<char>()).collect::<String>()
+            (0..len)
+                .map(|_| self.gen.gen::<char>())
+                .collect::<String>()
+                .into()
         } else {
-            let string = self
+            let user_string = self
                 .root_module
-                .string_at(StringPoolIndex::new(self.string_pool_index));
-            self.string_pool_index = self
-                .string_pool_index
+                .user_string_at(UserStringIndex::new(self.user_string_index));
+            self.user_string_index = self
+                .user_string_index
                 .checked_sub(1)
                 .expect("Exhausted strings in string pool");
-            string.to_string()
+            user_string.to_owned()
         }
     }
 
@@ -264,9 +268,9 @@ where
         self.gen.gen_range(1, bound)
     }
 
-    fn next_string_idx(&mut self) -> StringPoolIndex {
-        let len = self.root_module.string_pool().len();
-        StringPoolIndex::new(self.gen.gen_range(0, len) as TableIndex)
+    fn next_user_string_idx(&mut self) -> UserStringIndex {
+        let len = self.root_module.user_strings().len();
+        UserStringIndex::new(self.gen.gen_range(0, len) as TableIndex)
     }
 
     fn next_address_idx(&mut self) -> AddressPoolIndex {
@@ -311,13 +315,13 @@ where
         StructDefinitionIndex::new(struct_def_idx as TableIndex)
     }
 
-    fn next_stack_value(&mut self, stk: &[Local], is_padding: bool) -> Local {
+    fn next_stack_value(&mut self, stk: &[Value], is_padding: bool) -> Value {
         match self.gen.gen_range(0, 5) {
-            0 => Local::u64(self.next_int(stk)),
-            1 => Local::bool(self.next_bool()),
-            2 => Local::string(self.next_str(is_padding)),
-            3 => Local::bytearray(self.next_bytearray()),
-            _ => Local::address(self.next_addr(is_padding)),
+            0 => Value::u64(self.next_int(stk)),
+            1 => Value::bool(self.next_bool()),
+            2 => Value::string(self.next_vm_string(is_padding)),
+            3 => Value::byte_array(self.next_bytearray()),
+            _ => Value::address(self.next_addr(is_padding)),
         }
     }
 
@@ -329,11 +333,11 @@ where
         &'txn LoadedModule,
         LocalIndex,
         FunctionDefinitionIndex,
-        Local,
+        Stack,
     ) {
         // We pick a random function from the module in which to store the local
         let function_handle_idx = self.next_function_handle_idx();
-        let (module, function_definition, function_def_idx) =
+        let (module, function_definition, function_def_idx, function_sig) =
             self.resolve_function_handle(function_handle_idx);
         let type_sig = &module
             .locals_signature_at(function_definition.code.locals)
@@ -342,12 +346,11 @@ where
         let local_index = self.gen.gen_range(0, type_sig.len());
         let type_tok = &type_sig[local_index];
         let stack_local = self.resolve_to_value(type_tok, &[]);
-        (
-            module,
-            local_index as LocalIndex,
-            function_def_idx,
-            stack_local,
-        )
+        let mut stack = vec![stack_local];
+        for type_tok in function_sig.arg_types.iter() {
+            stack.push(self.resolve_to_value(type_tok, &[]))
+        }
+        (module, local_index as LocalIndex, function_def_idx, stack)
     }
 
     fn fill_instruction_arg(&mut self) -> (Bytecode, usize) {
@@ -385,8 +388,8 @@ where
                 (LdConst(i), 1)
             }
             LdStr(_) => {
-                let string_idx = self.next_string_idx();
-                let string_size = self.root_module.string_at(string_idx).len();
+                let string_idx = self.next_user_string_idx();
+                let string_size = self.root_module.user_string_at(string_idx).len();
                 (LdStr(string_idx), string_size)
             }
             LdByteArray(_) => {
@@ -408,42 +411,34 @@ where
         StructDefinitionIndex,
     ) {
         let struct_handle = self.root_module.struct_handle_at(struct_handle_index);
-        let struct_name = self.root_module.string_at(struct_handle.name);
+        let struct_name = self.root_module.identifier_at(struct_handle.name);
         let module_handle = self.root_module.module_handle_at(struct_handle.module);
         let module_id = self.to_module_id(module_handle);
         let module = self
             .module_cache
             .get_loaded_module(&module_id)
-            .expect("[Module Lookup] Invariant violation while looking up module")
             .expect("[Module Lookup] Runtime error while looking up module")
             .expect("[Module Lookup] Unable to find module");
-        let struct_def_idx = if self.struct_handle_table.contains_key(&module_id) {
-            self.struct_handle_table
-                .get(&module_id)
-                .expect("[Struct Definition Lookup] Unable to get struct handles for module")
-                .get(struct_name)
-        } else {
-            let entry = self
-                .struct_handle_table
-                .entry(module_id)
-                .or_insert_with(|| {
-                    module
-                        .struct_defs()
-                        .iter()
-                        .enumerate()
-                        .map(|(struct_def_index, struct_def)| {
-                            let handle = module.struct_handle_at(struct_def.struct_handle);
-                            let name = module.string_at(handle.name).to_string();
-                            (
-                                name,
-                                StructDefinitionIndex::new(struct_def_index as TableIndex),
-                            )
-                        })
-                        .collect()
-                });
-            entry.get(struct_name)
-        }
-        .expect("[Struct Definition Lookup] Unable to get struct definition for struct handle");
+        let struct_def_idx = self
+            .struct_handle_table
+            .entry(module_id)
+            .or_insert_with(|| {
+                module
+                    .struct_defs()
+                    .iter()
+                    .enumerate()
+                    .map(|(struct_def_index, struct_def)| {
+                        let handle = module.struct_handle_at(struct_def.struct_handle);
+                        let name = module.identifier_at(handle.name).to_owned();
+                        (
+                            name,
+                            StructDefinitionIndex::new(struct_def_index as TableIndex),
+                        )
+                    })
+                    .collect()
+            })
+            .get(struct_name)
+            .expect("[Struct Definition Lookup] Unable to get struct definition for struct handle");
 
         let struct_def = module.struct_def_at(*struct_def_idx);
         (module, struct_def, *struct_def_idx)
@@ -456,68 +451,59 @@ where
         &'txn LoadedModule,
         &'txn FunctionDefinition,
         FunctionDefinitionIndex,
+        &'txn FunctionSignature,
     ) {
         let function_handle = self.root_module.function_handle_at(function_handle_index);
-        let function_name = self.root_module.string_at(function_handle.name);
+        let function_signature = self
+            .root_module
+            .function_signature_at(function_handle.signature);
+        let function_name = self.root_module.identifier_at(function_handle.name);
         let module_handle = self.root_module.module_handle_at(function_handle.module);
         let module_id = self.to_module_id(module_handle);
         let module = self
             .module_cache
             .get_loaded_module(&module_id)
-            .expect("[Module Lookup] Invariant violation while looking up module")
             .expect("[Module Lookup] Runtime error while looking up module")
             .expect("[Module Lookup] Unable to find module");
-        let function_def_idx = if self.function_handle_table.contains_key(&module_id) {
-            *self
-                .function_handle_table
-                .get(&module_id)
-                .expect("[Function Definition Lookup] Unable to get function handles for module")
-                .get(function_name)
-                .expect(
-                    "[Function Definition Lookup] Unable to get function definition for struct handle",
-                )
-        } else {
-            let entry = self
-                .function_handle_table
-                .entry(module_id)
-                .or_insert_with(|| {
-                    module
-                        .function_defs()
-                        .iter()
-                        .enumerate()
-                        .map(|(function_def_index, function_def)| {
-                            let handle = module.function_handle_at(function_def.function);
-                            let name = module.string_at(handle.name).to_string();
-                            (
-                                name,
-                                FunctionDefinitionIndex::new(function_def_index as TableIndex),
-                            )
-                        })
-                        .collect()
-                });
-            *entry.get(function_name).unwrap()
-        };
+        let function_def_idx = *self
+            .function_handle_table
+            .entry(module_id)
+            .or_insert_with(|| {
+                module
+                    .function_defs()
+                    .iter()
+                    .enumerate()
+                    .map(|(function_def_index, function_def)| {
+                        let handle = module.function_handle_at(function_def.function);
+                        let name = module.identifier_at(handle.name).to_owned();
+                        (
+                            name,
+                            FunctionDefinitionIndex::new(function_def_index as TableIndex),
+                        )
+                    })
+                    .collect()
+            })
+            .get(function_name)
+            .unwrap();
 
         let function_def = module.function_def_at(function_def_idx);
-        (module, function_def, function_def_idx)
+        (module, function_def, function_def_idx, function_signature)
     }
 
     // Build an inhabitant of the type given by `sig_token`. We pass the current stack state in
     // since for certain instructions (...Sub) we need to generate number pairs that when
     // subtracted from each other do not cause overflow.
-    fn resolve_to_value(&mut self, sig_token: &SignatureToken, stk: &[Local]) -> Local {
+    fn resolve_to_value(&mut self, sig_token: &SignatureToken, stk: &[Value]) -> Value {
         match sig_token {
-            SignatureToken::Bool => Local::bool(self.next_bool()),
-            SignatureToken::U64 => Local::u64(self.next_int(stk)),
-            SignatureToken::String => Local::string(self.next_str(false)),
-            SignatureToken::Address => Local::address(self.next_addr(false)),
+            SignatureToken::Bool => Value::bool(self.next_bool()),
+            SignatureToken::U64 => Value::u64(self.next_int(stk)),
+            SignatureToken::String => Value::string(self.next_vm_string(false)),
+            SignatureToken::Address => Value::address(self.next_addr(false)),
             SignatureToken::Reference(sig) | SignatureToken::MutableReference(sig) => {
                 let underlying_value = self.resolve_to_value(sig, stk);
-                underlying_value
-                    .borrow_local()
-                    .expect("Unable to generate valid reference value")
+                Value::reference(Reference::new(underlying_value))
             }
-            SignatureToken::ByteArray => Local::bytearray(self.next_bytearray()),
+            SignatureToken::ByteArray => Value::byte_array(self.next_bytearray()),
             SignatureToken::Struct(struct_handle_idx, _) => {
                 assert!(self.root_module.struct_defs().len() > 1);
                 let struct_definition = self
@@ -535,28 +521,23 @@ where
                 let fields = self
                     .root_module
                     .field_def_range(num_fields as MemberCount, index);
-                let mutvals = fields
+                let values = fields
                     .iter()
                     .map(|field| {
                         self.resolve_to_value(
-                            &self.root_module
-
-                                .type_signature_at(field.signature)
-                                .0,
+                            &self.root_module.type_signature_at(field.signature).0,
                             stk,
                         )
-                        .value()
-                        .expect("[Struct Generation] Unable to get underlying value for generated struct field.")
                     })
                     .collect();
-                Local::struct_(mutvals)
+                Value::struct_(Struct::new(values))
             }
             SignatureToken::TypeParameter(_) => unimplemented!(),
         }
     }
 
     // Generate starting state of the stack based upon the type transition in the call info table.
-    fn generate_from_type(&mut self, typ: SignatureTy, stk: &[Local]) -> Local {
+    fn generate_from_type(&mut self, typ: SignatureTy, stk: &[Value]) -> Value {
         let is_variable = typ.is_variable();
         let underlying = typ.underlying();
         // If the underlying type is a variable type, then we can choose any type that we want.
@@ -584,9 +565,13 @@ where
                 // We can just pick a random address -- this is incorrect by the bytecode semantics
                 // (since we're moving to an account that doesn't exist), but since we don't need
                 // correctness beyond this instruction it's OK.
-                let addr = Local::address(self.next_addr(true));
-                let size = addr.size();
-                let stack = vec![addr];
+                let struct_definition = self.root_module.struct_def_at(struct_handle_idx);
+                let struct_stack = self.resolve_to_value(
+                    &SignatureToken::Struct(struct_definition.struct_handle, vec![]),
+                    &[],
+                );
+                let size = struct_stack.size();
+                let stack = vec![struct_stack];
                 StackState::new(
                     (self.root_module, None),
                     self.random_pad(stack),
@@ -597,7 +582,7 @@ where
             }
             MoveFrom(_, _) => {
                 let struct_handle_idx = self.next_resource();
-                let addr = Local::address(*self.account_address);
+                let addr = Value::address(*self.account_address);
                 let size = addr.size();
                 let stack = vec![addr];
                 StackState::new(
@@ -608,15 +593,28 @@ where
                     HashMap::new(),
                 )
             }
-            BorrowGlobal(_, _) => {
+            MutBorrowGlobal(_, _) => {
                 let struct_handle_idx = self.next_resource();
-                let addr = Local::address(*self.account_address);
+                let addr = Value::address(*self.account_address);
                 let size = addr.size();
                 let stack = vec![addr];
                 StackState::new(
                     (self.root_module, None),
                     self.random_pad(stack),
-                    BorrowGlobal(struct_handle_idx, NO_TYPE_ACTUALS),
+                    MutBorrowGlobal(struct_handle_idx, NO_TYPE_ACTUALS),
+                    size,
+                    HashMap::new(),
+                )
+            }
+            ImmBorrowGlobal(_, _) => {
+                let struct_handle_idx = self.next_resource();
+                let addr = Value::address(*self.account_address);
+                let size = addr.size();
+                let stack = vec![addr];
+                StackState::new(
+                    (self.root_module, None),
+                    self.random_pad(stack),
+                    ImmBorrowGlobal(struct_handle_idx, NO_TYPE_ACTUALS),
                     size,
                     HashMap::new(),
                 )
@@ -625,9 +623,9 @@ where
                 let next_struct_handle_idx = self.next_resource();
                 // Flip a coin to determine if the resource should exist or not.
                 let addr = if self.next_bool() {
-                    Local::address(*self.account_address)
+                    Value::address(*self.account_address)
                 } else {
-                    Local::address(self.next_addr(true))
+                    Value::address(self.next_addr(true))
                 };
                 let size = addr.size();
                 let stack = vec![addr];
@@ -641,7 +639,6 @@ where
             }
             Call(_, _) => {
                 let function_handle_idx = self.next_function_handle_idx();
-                let function_idx = self.resolve_function_handle(function_handle_idx).2;
                 let function_handle = self.root_module.function_handle_at(function_handle_idx);
                 let function_sig = self
                     .root_module
@@ -657,7 +654,7 @@ where
                     acc.add(local.size())
                 });
                 StackState::new(
-                    (self.root_module, Some(function_idx)),
+                    (self.root_module, None),
                     self.random_pad(stack),
                     Call(function_handle_idx, NO_TYPE_ACTUALS),
                     size,
@@ -739,7 +736,10 @@ where
                     &[],
                 );
                 let field_size = struct_stack
-                    .borrow_field(u32::from(field_index))
+                    .clone()
+                    .value_as::<ReferenceValue>()
+                    .expect("[BorrowField] Struct should be a reference.")
+                    .borrow_field(usize::from(field_index))
                     .expect("[BorrowField] Unable to borrow field of generated struct to get field size.")
                     .size();
                 let fdi = FieldDefinitionIndex::new(field_index);
@@ -758,23 +758,23 @@ where
             }
             StLoc(_) => {
                 let (module, local_idx, function_idx, stack_local) = self.next_local_state();
-                let size = stack_local.size();
+                let size = stack_local[0].size();
                 StackState::new(
                     (module, Some(function_idx)),
-                    self.random_pad(vec![stack_local]),
+                    self.random_pad(stack_local),
                     StLoc(local_idx as LocalIndex),
                     size,
                     HashMap::new(),
                 )
             }
             CopyLoc(_) | MoveLoc(_) | MutBorrowLoc(_) | ImmBorrowLoc(_) => {
-                let (module, local_idx, function_idx, frame_local) = self.next_local_state();
-                let size = frame_local.size();
+                let (module, local_idx, function_idx, mut frame_local) = self.next_local_state();
+                let size = frame_local[0].size();
                 let mut locals_mapping = HashMap::new();
-                locals_mapping.insert(local_idx as LocalIndex, frame_local);
+                locals_mapping.insert(local_idx as LocalIndex, frame_local.remove(0));
                 StackState::new(
                     (module, Some(function_idx)),
-                    self.random_pad(Vec::new()),
+                    self.random_pad(frame_local),
                     CopyLoc(local_idx as LocalIndex),
                     size,
                     locals_mapping,
@@ -851,6 +851,7 @@ where
         P: ModuleCache<'alloc>,
     {
         // Set the value stack
+        // This needs to happen before the frame transition.
         stk.set_stack(stack_state.stack);
 
         // Perform the frame transition (if there is any needed)
@@ -858,10 +859,10 @@ where
 
         // Populate the locals of the frame
         for (local_index, local) in stack_state.local_mapping.into_iter() {
-            assert_ok!(stk
-                .top_frame_mut()
+            stk.top_frame_mut()
                 .expect("[Stack Transition] Unable to get top frame on execution stack.")
-                .store_local(local_index, local));
+                .store_loc(local_index, local)
+                .unwrap();
         }
         (stack_state.instr, stack_state.size)
     }

@@ -4,10 +4,10 @@
 use lazy_static;
 use metrics::OpMetrics;
 use prometheus::{IntCounter, IntGauge};
-use std::convert::TryFrom;
+use std::{convert::TryFrom, time::Instant};
 use types::{
     transaction::TransactionStatus,
-    vm_error::{VMStatus, VMValidationStatus},
+    vm_error::{StatusCode, StatusType, VMStatus},
 };
 
 // constants used to create counters
@@ -16,13 +16,26 @@ const TXN_EXECUTION_DISCARD: &str = "txn.execution.discard";
 const TXN_VERIFICATION_SUCCESS: &str = "txn.verification.success";
 const TXN_VERIFICATION_FAIL: &str = "txn.verification.fail";
 const TXN_BLOCK_COUNT: &str = "txn.block.count";
+pub const TXN_TOTAL_TIME_TAKEN: &str = "txn_gas_total_time_taken";
+pub const TXN_VERIFICATION_TIME_TAKEN: &str = "txn_gas_verification_time_taken";
+pub const TXN_VALIDATION_TIME_TAKEN: &str = "txn_gas_validation_time_taken";
+pub const TXN_EXECUTION_TIME_TAKEN: &str = "txn_gas_execution_time_taken";
+pub const TXN_PROLOGUE_TIME_TAKEN: &str = "txn_gas_prologue_time_taken";
+pub const TXN_EPILOGUE_TIME_TAKEN: &str = "txn_gas_epilogue_time_taken";
+pub const TXN_EXECUTION_GAS_USAGE: &str = "txn_gas_execution_gas_usage";
+pub const TXN_TOTAL_GAS_USAGE: &str = "txn_gas_total_gas_usage";
 
 lazy_static::lazy_static! {
     // the main metric (move_vm)
-    static ref VM_COUNTERS: OpMetrics = OpMetrics::new_and_registered("move_vm");
+    pub static ref VM_COUNTERS: OpMetrics = OpMetrics::new_and_registered("move_vm");
 
     static ref VERIFIED_TRANSACTION: IntCounter = VM_COUNTERS.counter(TXN_VERIFICATION_SUCCESS);
     static ref BLOCK_TRANSACTION_COUNT: IntGauge = VM_COUNTERS.gauge(TXN_BLOCK_COUNT);
+}
+
+/// Wrapper around time::Instant.
+pub fn start_profile() -> Instant {
+    Instant::now()
 }
 
 /// Reports the number of transactions in a block.
@@ -31,6 +44,54 @@ pub fn report_block_count(count: usize) {
         Ok(val) => BLOCK_TRANSACTION_COUNT.set(val),
         Err(_) => BLOCK_TRANSACTION_COUNT.set(std::i64::MAX),
     }
+}
+
+// All statistics gather operations for the time taken/gas usage should go through this macro. This
+// gives us the ability to turn these metrics on and off easily from one place.
+#[macro_export]
+macro_rules! record_stats {
+    // Gather some information that is only needed in relation to recording statistics
+    (info | $($stmt:stmt);+;) => {
+        $($stmt);+;
+    };
+    // Set the $ident gauge to $amount
+    (gauge set | $ident:ident | $amount:expr) => {
+        VM_COUNTERS.set($ident, $amount as f64)
+    };
+    // Increment the $ident gauge by $amount
+    (gauge inc | $ident:ident | $amount:expr) => {
+        VM_COUNTERS.add($ident, $amount as f64)
+    };
+    // Decrement the $ident gauge by $amount
+    (gauge dec | $ident:ident | $amount:expr) => {
+        VM_COUNTERS.sub($ident, $amount as f64)
+    };
+    // Set the $ident gauge to $amount
+    (counter set | $ident:ident | $amount:expr) => {
+        VM_COUNTERS.set($ident, $amount as f64)
+    };
+    // Increment the $ident gauge by $amount
+    (counter inc | $ident:ident | $amount:expr) => {
+        VM_COUNTERS.add($ident, $amount as f64)
+    };
+    // Decrement the $ident gauge by $amount
+    (counter dec | $ident:ident | $amount:expr) => {
+        VM_COUNTERS.sub($ident, $amount as f64)
+    };
+    // Set the gas histogram for $ident to be $amount.
+    (observe | $ident:ident | $amount:expr) => {
+        VM_COUNTERS.observe($ident, $amount as f64)
+    };
+    // Per-block info: time and record the amount of time it took to execute $block under the
+    // $ident histogram. NB that this does not provide per-transaction level information, but will
+    // only per-block information.
+    (time_hist | $ident:ident | $block:block) => {{
+        let timer = start_profile();
+        let tmp = $block;
+        let duration = timer.elapsed();
+        VM_COUNTERS.observe_duration($ident, duration);
+        tmp
+    }};
 }
 
 /// Reports the result of a transaction execution.
@@ -57,56 +118,58 @@ pub fn report_verification_status(result: &Option<VMStatus>) {
 
 /// Increments one of the counter for verification or execution.
 fn inc_counter(prefix: &str, status: &VMStatus) {
-    match status {
-        VMStatus::Deserialization(_) => {
+    match status.status_type() {
+        StatusType::Deserialization => {
             // all serialization error are lumped into one bucket
             VM_COUNTERS.inc(&format!("{}.deserialization", prefix));
         }
-        VMStatus::Execution(status) => {
+        StatusType::Execution => {
             // counters for ExecutionStatus are as granular as the enum
-            VM_COUNTERS.inc(&format!("{}.{:?}", prefix, status));
+            VM_COUNTERS.inc(&format!("{}.{}", prefix, status));
         }
-        VMStatus::InvariantViolation(violation) => {
+        StatusType::InvariantViolation => {
             // counters for VMInvariantViolationError are as granular as the enum
-            VM_COUNTERS.inc(&format!("{}.invariant_violation.{:?}", prefix, violation));
+            VM_COUNTERS.inc(&format!("{}.invariant_violation.{}", prefix, status));
         }
-        VMStatus::Validation(validation_status) => {
+        StatusType::Validation => {
             // counters for validation errors are grouped according to get_validation_status()
             VM_COUNTERS.inc(&format!(
-                "{}.validation.{:?}",
+                "{}.validation.{}",
                 prefix,
-                get_validation_status(validation_status)
+                get_validation_status(status.major_status)
             ));
         }
-        VMStatus::Verification(_) => {
+        StatusType::Verification => {
             // all verifier errors are lumped into one bucket
             VM_COUNTERS.inc(&format!("{}.verifier_error", prefix));
+        }
+        StatusType::Unknown => {
+            VM_COUNTERS.inc(&format!("{}.Unknown", prefix));
         }
     }
 }
 
 /// Translate a `VMValidationStatus` enum to a set of strings that are appended to a 'base' counter
 /// name.
-fn get_validation_status(validation_status: &VMValidationStatus) -> &str {
+fn get_validation_status(validation_status: StatusCode) -> &'static str {
     match validation_status {
-        VMValidationStatus::InvalidSignature => "InvalidSignature",
-        VMValidationStatus::InvalidAuthKey => "InvalidAuthKey",
-        VMValidationStatus::SequenceNumberTooOld => "SequenceNumberTooOld",
-        VMValidationStatus::SequenceNumberTooNew => "SequenceNumberTooNew",
-        VMValidationStatus::InsufficientBalanceForTransactionFee => {
+        StatusCode::INVALID_SIGNATURE => "InvalidSignature",
+        StatusCode::INVALID_AUTH_KEY => "InvalidAuthKey",
+        StatusCode::SEQUENCE_NUMBER_TOO_OLD => "SequenceNumberTooOld",
+        StatusCode::SEQUENCE_NUMBER_TOO_NEW => "SequenceNumberTooNew",
+        StatusCode::INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE => {
             "InsufficientBalanceForTransactionFee"
         }
-        VMValidationStatus::TransactionExpired => "TransactionExpired",
-        VMValidationStatus::SendingAccountDoesNotExist(_) => "SendingAccountDoesNotExist",
-        VMValidationStatus::ExceededMaxTransactionSize(_) => "ExceededMaxTransactionSize",
-        VMValidationStatus::UnknownScript => "UnknownScript",
-        VMValidationStatus::UnknownModule => "UnknownModule",
-        VMValidationStatus::MaxGasUnitsExceedsMaxGasUnitsBound(_)
-        | VMValidationStatus::MaxGasUnitsBelowMinTransactionGasUnits(_)
-        | VMValidationStatus::GasUnitPriceBelowMinBound(_)
-        | VMValidationStatus::GasUnitPriceAboveMaxBound(_) => "GasError",
-        VMValidationStatus::RejectedWriteSet | VMValidationStatus::InvalidWriteSet => {
-            "WriteSetError"
-        }
+        StatusCode::TRANSACTION_EXPIRED => "TransactionExpired",
+        StatusCode::SENDING_ACCOUNT_DOES_NOT_EXIST => "SendingAccountDoesNotExist",
+        StatusCode::EXCEEDED_MAX_TRANSACTION_SIZE => "ExceededMaxTransactionSize",
+        StatusCode::UNKNOWN_SCRIPT => "UnknownScript",
+        StatusCode::UNKNOWN_MODULE => "UnknownModule",
+        StatusCode::MAX_GAS_UNITS_EXCEEDS_MAX_GAS_UNITS_BOUND
+        | StatusCode::MAX_GAS_UNITS_BELOW_MIN_TRANSACTION_GAS_UNITS
+        | StatusCode::GAS_UNIT_PRICE_BELOW_MIN_BOUND
+        | StatusCode::GAS_UNIT_PRICE_ABOVE_MAX_BOUND => "GasError",
+        StatusCode::REJECTED_WRITE_SET | StatusCode::INVALID_WRITE_SET => "WriteSetError",
+        _ => "UnknownValidationStatus",
     }
 }

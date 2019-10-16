@@ -6,27 +6,24 @@ use crate::{
         AdmissionControlService, SubmitTransactionRequest,
         SubmitTransactionResponse as ProtoSubmitTransactionResponse,
     },
-    unit_tests::LocalMockMempool,
+    mocks::local_mock_mempool::LocalMockMempool,
 };
 use admission_control_proto::{AdmissionControlStatus, SubmitTransactionResponse};
 
-use assert_matches::assert_matches;
-use crypto::{ed25519::*, hash::CryptoHash, test_utils::TEST_SEED, SigningKey};
+use crypto::{ed25519::*, test_utils::TEST_SEED};
 use mempool::proto::shared::mempool_status::MempoolAddTransactionStatusCode;
 use proto_conv::FromProto;
-use protobuf::{Message, UnknownFields};
 use rand::SeedableRng;
 use std::sync::Arc;
 use storage_service::mocks::mock_storage_client::MockStorageReadClient;
 use types::{
     account_address::{AccountAddress, ADDRESS_LENGTH},
     test_helpers::transaction_test_helpers::get_test_signed_txn,
-    transaction::RawTransactionBytes,
-    vm_error::{ExecutionStatus, VMStatus, VMValidationStatus},
+    vm_error::{StatusCode, VMStatus},
 };
 use vm_validator::mocks::mock_vm_validator::MockVMValidator;
 
-fn create_ac_service_for_ut() -> AdmissionControlService<LocalMockMempool, MockVMValidator> {
+pub fn create_ac_service_for_ut() -> AdmissionControlService<LocalMockMempool, MockVMValidator> {
     AdmissionControlService::new(
         Some(Arc::new(LocalMockMempool::new())),
         Arc::new(MockStorageReadClient),
@@ -37,14 +34,12 @@ fn create_ac_service_for_ut() -> AdmissionControlService<LocalMockMempool, MockV
 
 fn assert_status(response: ProtoSubmitTransactionResponse, status: VMStatus) {
     let rust_resp = SubmitTransactionResponse::from_proto(response).unwrap();
-    if rust_resp.ac_status.is_some() {
-        assert_eq!(
-            rust_resp.ac_status.unwrap(),
-            AdmissionControlStatus::Accepted
-        );
+    if let Some(resp_ac_status) = rust_resp.ac_status {
+        assert_eq!(resp_ac_status, AdmissionControlStatus::Accepted);
     } else {
         let decoded_response = rust_resp.vm_error.unwrap();
-        assert_eq!(decoded_response, status)
+        assert_eq!(decoded_response.major_status, status.major_status);
+        assert_eq!(decoded_response.sub_status, status.sub_status);
     }
 }
 
@@ -66,9 +61,7 @@ fn test_submit_txn_inner_vm() {
     let response = ac_service.submit_transaction_inner(req.clone()).unwrap();
     assert_status(
         response,
-        VMStatus::Validation(VMValidationStatus::SendingAccountDoesNotExist(
-            "TEST".to_string(),
-        )),
+        VMStatus::new(StatusCode::SENDING_ACCOUNT_DOES_NOT_EXIST),
     );
     let sender = AccountAddress::new([1; ADDRESS_LENGTH]);
     req.set_signed_txn(get_test_signed_txn(
@@ -79,10 +72,7 @@ fn test_submit_txn_inner_vm() {
         None,
     ));
     let response = ac_service.submit_transaction_inner(req.clone()).unwrap();
-    assert_status(
-        response,
-        VMStatus::Validation(VMValidationStatus::InvalidSignature),
-    );
+    assert_status(response, VMStatus::new(StatusCode::INVALID_SIGNATURE));
     let sender = AccountAddress::new([2; ADDRESS_LENGTH]);
     req.set_signed_txn(get_test_signed_txn(
         sender,
@@ -94,7 +84,7 @@ fn test_submit_txn_inner_vm() {
     let response = ac_service.submit_transaction_inner(req.clone()).unwrap();
     assert_status(
         response,
-        VMStatus::Validation(VMValidationStatus::InsufficientBalanceForTransactionFee),
+        VMStatus::new(StatusCode::INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE),
     );
     let sender = AccountAddress::new([3; ADDRESS_LENGTH]);
     req.set_signed_txn(get_test_signed_txn(
@@ -105,10 +95,7 @@ fn test_submit_txn_inner_vm() {
         None,
     ));
     let response = ac_service.submit_transaction_inner(req.clone()).unwrap();
-    assert_status(
-        response,
-        VMStatus::Validation(VMValidationStatus::SequenceNumberTooNew),
-    );
+    assert_status(response, VMStatus::new(StatusCode::SEQUENCE_NUMBER_TOO_NEW));
     let sender = AccountAddress::new([4; ADDRESS_LENGTH]);
     req.set_signed_txn(get_test_signed_txn(
         sender,
@@ -118,10 +105,7 @@ fn test_submit_txn_inner_vm() {
         None,
     ));
     let response = ac_service.submit_transaction_inner(req.clone()).unwrap();
-    assert_status(
-        response,
-        VMStatus::Validation(VMValidationStatus::SequenceNumberTooOld),
-    );
+    assert_status(response, VMStatus::new(StatusCode::SEQUENCE_NUMBER_TOO_OLD));
     let sender = AccountAddress::new([5; ADDRESS_LENGTH]);
     req.set_signed_txn(get_test_signed_txn(
         sender,
@@ -131,10 +115,7 @@ fn test_submit_txn_inner_vm() {
         None,
     ));
     let response = ac_service.submit_transaction_inner(req.clone()).unwrap();
-    assert_status(
-        response,
-        VMStatus::Validation(VMValidationStatus::TransactionExpired),
-    );
+    assert_status(response, VMStatus::new(StatusCode::TRANSACTION_EXPIRED));
     let sender = AccountAddress::new([6; ADDRESS_LENGTH]);
     req.set_signed_txn(get_test_signed_txn(
         sender,
@@ -144,10 +125,7 @@ fn test_submit_txn_inner_vm() {
         None,
     ));
     let response = ac_service.submit_transaction_inner(req.clone()).unwrap();
-    assert_status(
-        response,
-        VMStatus::Validation(VMValidationStatus::InvalidAuthKey),
-    );
+    assert_status(response, VMStatus::new(StatusCode::INVALID_AUTH_KEY));
     let sender = AccountAddress::new([8; ADDRESS_LENGTH]);
     req.set_signed_txn(get_test_signed_txn(
         sender,
@@ -157,7 +135,7 @@ fn test_submit_txn_inner_vm() {
         None,
     ));
     let response = ac_service.submit_transaction_inner(req.clone()).unwrap();
-    assert_status(response, VMStatus::Execution(ExecutionStatus::Executed));
+    assert_status(response, VMStatus::new(StatusCode::EXECUTED));
 
     let sender = AccountAddress::new([8; ADDRESS_LENGTH]);
     let test_key = compat::generate_keypair(&mut rng);
@@ -169,42 +147,7 @@ fn test_submit_txn_inner_vm() {
         None,
     ));
     let response = ac_service.submit_transaction_inner(req.clone()).unwrap();
-    assert_status(
-        response,
-        VMStatus::Validation(VMValidationStatus::InvalidSignature),
-    );
-}
-
-#[test]
-fn test_reject_unknown_fields() {
-    let ac_service = create_ac_service_for_ut();
-    let mut req: SubmitTransactionRequest = SubmitTransactionRequest::new();
-    let keypair = compat::generate_keypair(None);
-    let sender = AccountAddress::random();
-    let mut signed_txn = get_test_signed_txn(sender, 0, keypair.0.clone(), keypair.1, None);
-    let mut raw_txn = protobuf::parse_from_bytes::<::types::proto::transaction::RawTransaction>(
-        signed_txn.raw_txn_bytes.as_ref(),
-    )
-    .unwrap();
-    let mut unknown_fields = UnknownFields::new();
-    unknown_fields.add_fixed32(1, 2);
-    raw_txn.unknown_fields = unknown_fields;
-
-    let bytes = raw_txn.write_to_bytes().unwrap();
-    let hash = RawTransactionBytes(&bytes).hash();
-    let signature = keypair.0.sign_message(&hash);
-
-    signed_txn.set_raw_txn_bytes(bytes);
-    signed_txn.set_sender_signature(signature.to_bytes().to_vec());
-    req.set_signed_txn(signed_txn);
-    let response = SubmitTransactionResponse::from_proto(
-        ac_service.submit_transaction_inner(req.clone()).unwrap(),
-    )
-    .unwrap();
-    assert_matches!(
-        response.ac_status.unwrap(),
-        AdmissionControlStatus::Rejected(_)
-    );
+    assert_status(response, VMStatus::new(StatusCode::INVALID_SIGNATURE));
 }
 
 #[test]
@@ -275,5 +218,21 @@ fn test_submit_txn_inner_mempool() {
     assert_eq!(
         response.ac_status.unwrap(),
         AdmissionControlStatus::Accepted,
+    );
+    let accepted_add = AccountAddress::new([104; ADDRESS_LENGTH]);
+    req.set_signed_txn(get_test_signed_txn(
+        accepted_add,
+        0,
+        keypair.0.clone(),
+        keypair.1,
+        None,
+    ));
+    let response = SubmitTransactionResponse::from_proto(
+        ac_service.submit_transaction_inner(req.clone()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        response.mempool_error.unwrap().code,
+        MempoolAddTransactionStatusCode::MempoolIsFull,
     );
 }

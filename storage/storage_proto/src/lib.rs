@@ -23,11 +23,9 @@
 //! [`storage_client`](../storage_client/index.html) don't need to depending on the entire
 //! [`storage_service`](../storage_client/index.html).
 
-#![allow(clippy::unit_arg)]
-
 pub mod proto;
 
-use crypto::{ed25519::*, HashValue};
+use crypto::HashValue;
 use failure::prelude::*;
 #[cfg(any(test, feature = "testing"))]
 use proptest_derive::Arbitrary;
@@ -35,7 +33,8 @@ use proto_conv::{FromProto, IntoProto};
 use types::{
     account_address::AccountAddress,
     account_state_blob::AccountStateBlob,
-    ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
+    crypto_proxies::LedgerInfoWithSignatures,
+    ledger_info::LedgerInfo,
     proof::SparseMerkleProof,
     transaction::{TransactionListWithProof, TransactionToCommit, Version},
 };
@@ -146,7 +145,7 @@ impl Into<(Option<AccountStateBlob>, SparseMerkleProof)>
 pub struct SaveTransactionsRequest {
     pub txns_to_commit: Vec<TransactionToCommit>,
     pub first_version: Version,
-    pub ledger_info_with_signatures: Option<LedgerInfoWithSignatures<Ed25519Signature>>,
+    pub ledger_info_with_signatures: Option<LedgerInfoWithSignatures>,
 }
 
 impl SaveTransactionsRequest {
@@ -154,7 +153,7 @@ impl SaveTransactionsRequest {
     pub fn new(
         txns_to_commit: Vec<TransactionToCommit>,
         first_version: Version,
-        ledger_info_with_signatures: Option<LedgerInfoWithSignatures<Ed25519Signature>>,
+        ledger_info_with_signatures: Option<LedgerInfoWithSignatures>,
     ) -> Self {
         SaveTransactionsRequest {
             txns_to_commit,
@@ -370,6 +369,50 @@ impl IntoProto for GetStartupInfoResponse {
             proto.set_info(info.into_proto())
         }
         proto
+    }
+}
+
+/// Helper to construct and parse [`proto::storage::GetLatestLedgerInfosPerEpochRequest`]
+///
+/// It does so by implementing [`IntoProto`](#impl-IntoProto) and [`FromProto`](#impl-FromProto),
+/// providing [`into_proto`](IntoProto::into_proto) and [`from_proto`](FromProto::from_proto).
+#[derive(Clone, Debug, Eq, PartialEq, FromProto, IntoProto)]
+#[cfg_attr(any(test, feature = "testing"), derive(Arbitrary))]
+#[ProtoType(crate::proto::storage::GetLatestLedgerInfosPerEpochRequest)]
+pub struct GetLatestLedgerInfosPerEpochRequest {
+    pub start_epoch: u64,
+}
+
+impl GetLatestLedgerInfosPerEpochRequest {
+    /// Constructor.
+    pub fn new(start_epoch: u64) -> Self {
+        Self { start_epoch }
+    }
+}
+
+/// Helper to construct and parse [`proto::storage::GetLatestLedgerInfosPerEpochResponse`]
+///
+/// It does so by implementing [`IntoProto`](#impl-IntoProto) and [`FromProto`](#impl-FromProto),
+/// providing [`into_proto`](IntoProto::into_proto) and [`from_proto`](FromProto::from_proto).
+#[derive(Clone, Debug, Eq, PartialEq, FromProto, IntoProto)]
+#[cfg_attr(any(test, feature = "testing"), derive(Arbitrary))]
+#[ProtoType(crate::proto::storage::GetLatestLedgerInfosPerEpochResponse)]
+pub struct GetLatestLedgerInfosPerEpochResponse {
+    pub latest_ledger_infos: Vec<LedgerInfoWithSignatures>,
+}
+
+impl GetLatestLedgerInfosPerEpochResponse {
+    /// Constructor.
+    pub fn new(latest_ledger_infos: Vec<LedgerInfoWithSignatures>) -> Self {
+        Self {
+            latest_ledger_infos,
+        }
+    }
+}
+
+impl Into<Vec<LedgerInfoWithSignatures>> for GetLatestLedgerInfosPerEpochResponse {
+    fn into(self) -> Vec<LedgerInfoWithSignatures> {
+        self.latest_ledger_infos
     }
 }
 

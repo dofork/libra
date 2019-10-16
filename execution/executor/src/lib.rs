@@ -11,26 +11,34 @@ mod executor_test;
 mod mock_vm;
 
 use crate::block_processor::BlockProcessor;
+use canonical_serialization::{CanonicalSerialize, CanonicalSerializer};
 use config::config::NodeConfig;
 use crypto::{
-    ed25519::*,
-    hash::{GENESIS_BLOCK_ID, PRE_GENESIS_BLOCK_ID, SPARSE_MERKLE_PLACEHOLDER_HASH},
+    hash::{
+        TransactionAccumulatorHasher, ACCUMULATOR_PLACEHOLDER_HASH, GENESIS_BLOCK_ID,
+        PRE_GENESIS_BLOCK_ID, SPARSE_MERKLE_PLACEHOLDER_HASH,
+    },
     HashValue,
 };
-use execution_proto::{CommitBlockResponse, ExecuteBlockResponse, ExecuteChunkResponse};
 use failure::{format_err, Result};
 use futures::{channel::oneshot, executor::block_on};
 use lazy_static::lazy_static;
 use logger::prelude::*;
+use scratchpad::SparseMerkleTree;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     marker::PhantomData,
+    rc::Rc,
     sync::{mpsc, Arc, Mutex},
 };
 use storage_client::{StorageRead, StorageWrite};
 use types::{
-    ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
-    transaction::{SignedTransaction, TransactionListWithProof},
+    crypto_proxies::LedgerInfoWithSignatures,
+    ledger_info::LedgerInfo,
+    proof::accumulator::Accumulator,
+    transaction::{SignedTransaction, TransactionListWithProof, TransactionStatus, Version},
+    validator_set::ValidatorSet,
 };
 use vm_runtime::VMExecutor;
 
@@ -38,6 +46,72 @@ lazy_static! {
     static ref OP_COUNTERS: metrics::OpMetrics = metrics::OpMetrics::new_and_registered("executor");
 }
 
+/// A structure that specifies the result of the execution.
+/// The execution is responsible for generating the ID of the new state, which is returned in the
+/// result.
+///
+/// Not every transaction in the payload succeeds: the returned vector keeps the boolean status
+/// of success / failure of the transactions.
+/// Note that the specific details of compute_status are opaque to StateMachineReplication,
+/// which is going to simply pass the results between StateComputer and TxnManager.
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
+pub struct StateComputeResult {
+    pub executed_state: ExecutedState,
+    /// The compute status (success/failure) of the given payload. The specific details are opaque
+    /// for StateMachineReplication, which is merely passing it between StateComputer and
+    /// TxnManager.
+    pub compute_status: Vec<TransactionStatus>,
+}
+
+impl StateComputeResult {
+    pub fn version(&self) -> Version {
+        self.executed_state.version
+    }
+
+    pub fn root_hash(&self) -> HashValue {
+        self.executed_state.state_id
+    }
+
+    pub fn status(&self) -> &Vec<TransactionStatus> {
+        &self.compute_status
+    }
+}
+
+/// Executed state derived from StateComputeResult that is maintained with every proposed block.
+/// `state_id`(transaction accumulator root hash) summarized both the information of the version and
+/// the validators.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutedState {
+    /// Tracks the execution state of a proposed block
+    pub state_id: HashValue,
+    /// Version of after executing a proposed block.  This state must be persisted to ensure
+    /// that on restart that the version is calculated correctly
+    pub version: Version,
+    /// If set, this is the validator set that should be changed to if this block is committed.
+    /// TODO [Reconfiguration] the validators are currently ignored, no reconfiguration yet.
+    pub validators: Option<ValidatorSet>,
+}
+
+impl ExecutedState {
+    pub fn state_for_genesis() -> Self {
+        ExecutedState {
+            state_id: *ACCUMULATOR_PLACEHOLDER_HASH,
+            version: 0,
+            validators: None,
+        }
+    }
+}
+
+impl CanonicalSerialize for ExecutedState {
+    fn serialize(&self, serializer: &mut impl CanonicalSerializer) -> Result<()> {
+        serializer.encode_bytes(self.state_id.as_ref())?;
+        serializer.encode_u64(self.version)?;
+        if let Some(validators) = &self.validators {
+            serializer.encode_struct(validators)?;
+        }
+        Ok(())
+    }
+}
 /// `Executor` implements all functionalities the execution module needs to provide.
 pub struct Executor<V> {
     /// A thread that keeps processing blocks.
@@ -107,7 +181,7 @@ where
                             committed_timestamp_usecs,
                             state_root_hash,
                             frozen_subtrees_in_accumulator,
-                            num_leaves_in_accumulator,
+                            num_leaves_in_accumulator as usize,
                             committed_block_id,
                             storage_read_client,
                             storage_write_client,
@@ -138,7 +212,7 @@ where
         // Create a block with genesis_txn being the only transaction. Execute it then commit it
         // immediately.
         // We create `PRE_GENESIS_BLOCK_ID` as the parent of the genesis block.
-        let response = block_on(self.execute_block(
+        let state_compute_result = block_on(self.execute_block(
             vec![genesis_txn],
             *PRE_GENESIS_BLOCK_ID,
             *GENESIS_BLOCK_ID,
@@ -146,7 +220,7 @@ where
         .expect("Response sender was unexpectedly dropped.")
         .expect("Failed to execute genesis block.");
 
-        let root_hash = response.root_hash();
+        let root_hash = state_compute_result.executed_state.state_id;
         let ledger_info = LedgerInfo::new(
             /* version = */ 0,
             root_hash,
@@ -154,6 +228,7 @@ where
             *GENESIS_BLOCK_ID,
             /* epoch_num = */ 0,
             /* timestamp_usecs = */ 0,
+            None,
         );
         let ledger_info_with_sigs =
             LedgerInfoWithSignatures::new(ledger_info, /* signatures = */ HashMap::new());
@@ -169,7 +244,7 @@ where
         transactions: Vec<SignedTransaction>,
         parent_id: HashValue,
         id: HashValue,
-    ) -> oneshot::Receiver<Result<ExecuteBlockResponse>> {
+    ) -> oneshot::Receiver<Result<StateComputeResult>> {
         debug!(
             "Received request to execute block. Parent id: {:x}. Id: {:x}.",
             parent_id, id
@@ -197,11 +272,11 @@ where
         resp_receiver
     }
 
-    /// Commits a block and all its ancestors.
+    /// Commits a block and all its ancestors. Returns `Ok(())` if successful.
     pub fn commit_block(
         &self,
-        ledger_info_with_sigs: LedgerInfoWithSignatures<Ed25519Signature>,
-    ) -> oneshot::Receiver<Result<CommitBlockResponse>> {
+        ledger_info_with_sigs: LedgerInfoWithSignatures,
+    ) -> oneshot::Receiver<Result<()>> {
         debug!(
             "Received request to commit block {:x}.",
             ledger_info_with_sigs.ledger_info().consensus_block_id()
@@ -232,8 +307,8 @@ where
     pub fn execute_chunk(
         &self,
         txn_list_with_proof: TransactionListWithProof,
-        ledger_info_with_sigs: LedgerInfoWithSignatures<Ed25519Signature>,
-    ) -> oneshot::Receiver<Result<ExecuteChunkResponse>> {
+        ledger_info_with_sigs: LedgerInfoWithSignatures,
+    ) -> oneshot::Receiver<Result<()>> {
         debug!(
             "Received request to execute chunk. Chunk size: {}. Target version: {}.",
             txn_list_with_proof.transaction_and_infos.len(),
@@ -285,15 +360,48 @@ enum Command {
         transactions: Vec<SignedTransaction>,
         parent_id: HashValue,
         id: HashValue,
-        resp_sender: oneshot::Sender<Result<ExecuteBlockResponse>>,
+        resp_sender: oneshot::Sender<Result<StateComputeResult>>,
     },
     CommitBlock {
-        ledger_info_with_sigs: LedgerInfoWithSignatures<Ed25519Signature>,
-        resp_sender: oneshot::Sender<Result<CommitBlockResponse>>,
+        ledger_info_with_sigs: LedgerInfoWithSignatures,
+        resp_sender: oneshot::Sender<Result<()>>,
     },
     ExecuteChunk {
         txn_list_with_proof: TransactionListWithProof,
-        ledger_info_with_sigs: LedgerInfoWithSignatures<Ed25519Signature>,
-        resp_sender: oneshot::Sender<Result<ExecuteChunkResponse>>,
+        ledger_info_with_sigs: LedgerInfoWithSignatures,
+        resp_sender: oneshot::Sender<Result<()>>,
     },
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutedTrees {
+    /// The in-memory Sparse Merkle Tree representing a specific state after execution. If this
+    /// tree is presenting the latest commited state, it will have a single Subtree node (or
+    /// Empty node) whose hash equals the root hash of the newest Sparse Merkle Tree in
+    /// storage.
+    state_tree: Rc<SparseMerkleTree>,
+
+    /// The in-memory Merkle Accumulator representing a blockchain state consistent with the
+    /// `state_tree`.
+    transaction_accumulator: Rc<Accumulator<TransactionAccumulatorHasher>>,
+}
+
+impl ExecutedTrees {
+    pub fn state_tree(&self) -> &Rc<SparseMerkleTree> {
+        &self.state_tree
+    }
+
+    pub fn txn_accumulator(&self) -> &Rc<Accumulator<TransactionAccumulatorHasher>> {
+        &self.transaction_accumulator
+    }
+
+    pub fn version_and_state_root(&self) -> (Option<Version>, HashValue) {
+        let num_elements = self.txn_accumulator().num_leaves() as u64;
+        let version = if num_elements > 0 {
+            Some(num_elements - 1)
+        } else {
+            None
+        };
+        (version, self.state_tree().root_hash())
+    }
 }

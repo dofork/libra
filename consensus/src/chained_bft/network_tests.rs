@@ -1,22 +1,19 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    chained_bft::{
-        common::Author,
-        consensus_types::{
-            block::Block, proposal_msg::ProposalMsg, quorum_cert::QuorumCert, sync_info::SyncInfo,
-            vote_data::VoteData,
-        },
-        epoch_manager::EpochManager,
-        network::{BlockRetrievalResponse, ConsensusNetworkImpl, NetworkReceivers},
-        safety::vote_msg::VoteMsg,
-        test_utils::{consensus_runtime, placeholder_ledger_info},
+use crate::chained_bft::{
+    common::Author,
+    consensus_types::{
+        block::Block, proposal_msg::ProposalMsg, quorum_cert::QuorumCert, sync_info::SyncInfo,
+        vote_data::VoteData, vote_msg::VoteMsg,
     },
-    state_replication::ExecutedState,
+    epoch_manager::EpochManager,
+    network::{BlockRetrievalResponse, ConsensusNetworkImpl, NetworkReceivers},
+    test_utils::{consensus_runtime, placeholder_ledger_info},
 };
 use channel;
-use crypto::{ed25519::*, HashValue};
+use crypto::HashValue;
+use executor::ExecutedState;
 use futures::{channel::mpsc, executor::block_on, FutureExt, SinkExt, StreamExt, TryFutureExt};
 use network::{
     interface::{NetworkNotification, NetworkRequest},
@@ -30,7 +27,7 @@ use std::{
     time::Duration,
 };
 use tokio::runtime::TaskExecutor;
-use types::{validator_signer::ValidatorSigner, validator_verifier::ValidatorVerifier};
+use types::crypto_proxies::{ValidatorSigner, ValidatorVerifier};
 
 /// `NetworkPlayground` mocks the network implementation and provides convenience
 /// methods for testing. Test clients can use `wait_for_messages` or
@@ -107,7 +104,7 @@ impl NetworkPlayground {
                     let mut node_consensus_tx = node_consensus_txs
                         .lock()
                         .unwrap()
-                        .get(&dst.into())
+                        .get(&dst)
                         .unwrap()
                         .clone();
 
@@ -118,7 +115,7 @@ impl NetworkPlayground {
                     };
 
                     node_consensus_tx
-                        .send(NetworkNotification::RecvRpc(src.into(), inbound_req))
+                        .send(NetworkNotification::RecvRpc(src, inbound_req))
                         .await
                         .unwrap();
                 }
@@ -177,15 +174,13 @@ impl NetworkPlayground {
             .node_consensus_txs
             .lock()
             .unwrap()
-            .get(&dst.into())
+            .get(&dst)
             .unwrap()
             .clone();
 
         // convert NetworkRequest to corresponding NetworkNotification
         let msg_notif = match msg {
-            NetworkRequest::SendMessage(_dst, msg) => {
-                NetworkNotification::RecvMessage(src.into(), msg)
-            }
+            NetworkRequest::SendMessage(_dst, msg) => NetworkNotification::RecvMessage(src, msg),
             msg => panic!("[network playground] Unexpected NetworkRequest: {:?}", msg),
         };
 
@@ -193,7 +188,7 @@ impl NetworkPlayground {
         let msg_copy = match &msg_notif {
             NetworkNotification::RecvMessage(src, msg) => {
                 let msg: ConsensusMsg = ::protobuf::parse_from_bytes(msg.mdata.as_ref()).unwrap();
-                ((*src).into(), msg)
+                (*src, msg)
             }
             msg_notif => panic!(
                 "[network playground] Unexpected NetworkNotification: {:?}",
@@ -289,16 +284,8 @@ struct DropConfig(HashMap<Author, HashSet<Author>>);
 impl DropConfig {
     pub fn is_message_dropped(&self, src: &Author, net_req: &NetworkRequest) -> bool {
         match net_req {
-            NetworkRequest::SendMessage(dst, _) => self
-                .0
-                .get(src.into())
-                .unwrap()
-                .contains(&Author::from(*dst)),
-            NetworkRequest::SendRpc(dst, _) => self
-                .0
-                .get(src.into())
-                .unwrap()
-                .contains(&Author::from(*dst)),
+            NetworkRequest::SendMessage(dst, _) => self.0.get(src).unwrap().contains(&dst),
+            NetworkRequest::SendRpc(dst, _) => self.0.get(src).unwrap().contains(&dst),
             _ => true,
         }
     }
@@ -356,7 +343,7 @@ fn test_network_api() {
     let vote = VoteMsg::new(
         VoteData::new(
             HashValue::random(),
-            ExecutedState::state_for_genesis(),
+            ExecutedState::state_for_genesis().state_id,
             1,
             HashValue::random(),
             0,
@@ -369,10 +356,10 @@ fn test_network_api() {
     );
     let previous_block = Block::make_genesis_block();
     let previous_qc = QuorumCert::certificate_for_genesis();
-    let proposal = ProposalMsg {
-        proposal: Block::make_block(&previous_block, 0, 1, 0, previous_qc.clone(), &signers[0]),
-        sync_info: SyncInfo::new(previous_qc.clone(), previous_qc.clone(), None),
-    };
+    let proposal = ProposalMsg::new(
+        Block::make_block(&previous_block, 0, 1, 0, previous_qc.clone(), &signers[0]),
+        SyncInfo::new(previous_qc.clone(), previous_qc.clone(), None),
+    );
     block_on(async move {
         nodes[0].send_vote(vote.clone(), peers[2..5].to_vec()).await;
         playground
@@ -404,7 +391,7 @@ fn test_rpc() {
     let mut nodes = Vec::new();
     let mut author_to_public_keys = HashMap::new();
     for i in 0..num_nodes {
-        let random_validator_signer = ValidatorSigner::<Ed25519PrivateKey>::random([i as u8; 32]);
+        let random_validator_signer = ValidatorSigner::random([i as u8; 32]);
         author_to_public_keys.insert(
             random_validator_signer.author(),
             random_validator_signer.public_key(),

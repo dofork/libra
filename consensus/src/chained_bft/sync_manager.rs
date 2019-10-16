@@ -3,22 +3,25 @@
 
 use crate::{
     chained_bft::{
-        block_storage::{BlockReader, BlockStore, InsertError, NeedFetchResult},
+        block_storage::{BlockReader, BlockStore, NeedFetchResult},
         common::{Author, Payload},
-        consensus_types::{block::Block, quorum_cert::QuorumCert, sync_info::SyncInfo},
+        consensus_types::{
+            block::{Block, ExecutedBlock},
+            quorum_cert::QuorumCert,
+            sync_info::SyncInfo,
+        },
         network::ConsensusNetworkImpl,
         persistent_storage::PersistentStorage,
     },
     counters,
     state_replication::StateComputer,
 };
-use failure::{self, Fail};
+use failure;
 use logger::prelude::*;
 use network::proto::BlockRetrievalStatus;
 use rand::{prelude::*, Rng};
 use std::{
     clone::Clone,
-    result::Result,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -114,7 +117,7 @@ where
     pub async fn execute_and_insert_block(
         &self,
         block: Block<T>,
-    ) -> Result<Arc<Block<T>>, InsertError> {
+    ) -> failure::Result<Arc<ExecutedBlock<T>>> {
         // execute_and_insert_block has shortcut to return block if it exists
         self.block_store.execute_and_insert_block(block).await
     }
@@ -128,7 +131,7 @@ where
         qc: QuorumCert,
         preferred_peer: Author,
         deadline: Instant,
-    ) -> Result<(), InsertError> {
+    ) -> failure::Result<()> {
         let mut pending = vec![];
         let network = self.network.clone();
         let mut retriever = BlockRetriever {
@@ -211,24 +214,8 @@ where
         self.storage
             .save_tree(blocks.clone(), quorum_certs.clone())?;
         let pre_sync_instance = Instant::now();
-        match self
-            .state_computer
-            .sync_to(highest_ledger_info.clone())
-            .await
-        {
-            Ok(true) => (),
-            Ok(false) => panic!(
-                "state synchronizer failure, this validator will be killed as it can not \
-                 recover from this error.  After the validator is restarted, synchronization will \
-                 be retried.",
-            ),
-            Err(e) => panic!(
-                "state synchronizer failure: {:?}, this validator will be killed as it can not \
-                 recover from this error.  After the validator is restarted, synchronization will \
-                 be retried.",
-                e
-            ),
-        };
+        self.state_computer
+            .sync_to_or_bail(highest_ledger_info.clone());
         counters::STATE_SYNC_DURATION_S.observe_duration(pre_sync_instance.elapsed());
         let root = (
             blocks.pop().expect("should have 3-chain"),
@@ -250,20 +237,6 @@ struct BlockRetriever {
     preferred_peer: Author,
 }
 
-#[derive(Debug, Fail)]
-enum BlockRetrieverError {
-    #[fail(display = "All peers failed")]
-    AllPeersFailed,
-    #[fail(display = "Round deadline reached")]
-    RoundDeadlineReached,
-}
-
-impl From<BlockRetrieverError> for InsertError {
-    fn from(_error: BlockRetrieverError) -> Self {
-        InsertError::AncestorRetrievalError
-    }
-}
-
 impl BlockRetriever {
     /// Retrieve chain of n blocks for given QC
     ///
@@ -281,7 +254,7 @@ impl BlockRetriever {
         &'a mut self,
         qc: &'a QuorumCert,
         num_blocks: u64,
-    ) -> Result<Vec<Block<T>>, BlockRetrieverError>
+    ) -> failure::Result<Vec<Block<T>>>
     where
         T: Payload,
     {
@@ -290,11 +263,11 @@ impl BlockRetriever {
         let mut attempt = 0_u32;
         loop {
             if peers.is_empty() {
-                warn!(
+                bail!(
                     "Failed to fetch block {} in {} attempts: no more peers available",
-                    block_id, attempt
+                    block_id,
+                    attempt
                 );
-                return Err(BlockRetrieverError::AllPeersFailed);
             }
             let peer = self.pick_peer(attempt, &mut peers);
             attempt += 1;
@@ -303,8 +276,7 @@ impl BlockRetriever {
             let timeout = if let Some(timeout) = timeout {
                 timeout
             } else {
-                warn!("Failed to fetch block {} from {}, attempt {}: round deadline was reached, won't make more attempts", block_id, peer, attempt);
-                return Err(BlockRetrieverError::RoundDeadlineReached);
+                bail!("Failed to fetch block {} from {}, attempt {}: round deadline was reached, won't make more attempts", block_id, peer, attempt);
             };
             debug!(
                 "Fetching {} from {}, attempt {}",
