@@ -338,6 +338,14 @@
       <sourceFolder url="file://$MODULE_DIR$/crypto/crypto_derive/examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crypto/crypto_derive/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crypto/crypto_derive/benches" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/common/datatest-stable/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/common/datatest-stable/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/common/datatest-stable/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/common/datatest-stable/benches" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/common/nibble/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/common/nibble/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/common/nibble/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/common/nibble/benches" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/admission_control/admission_control_proto/target" />
       <excludeFolder url="file://$MODULE_DIR$/admission_control/admission_control_service/target" />
       <excludeFolder url="file://$MODULE_DIR$/benchmark/target" />
@@ -348,6 +356,7 @@
       <excludeFolder url="file://$MODULE_DIR$/common/canonical_serialization/target" />
       <excludeFolder url="file://$MODULE_DIR$/common/channel/target" />
       <excludeFolder url="file://$MODULE_DIR$/common/crash_handler/target" />
+      <excludeFolder url="file://$MODULE_DIR$/common/datatest-stable/target" />
       <excludeFolder url="file://$MODULE_DIR$/common/debug_interface/target" />
       <excludeFolder url="file://$MODULE_DIR$/common/executable_helpers/target" />
       <excludeFolder url="file://$MODULE_DIR$/common/failure_ext/failure_macros/target" />
@@ -358,6 +367,7 @@
       <excludeFolder url="file://$MODULE_DIR$/common/jemalloc/target" />
       <excludeFolder url="file://$MODULE_DIR$/common/logger/target" />
       <excludeFolder url="file://$MODULE_DIR$/common/metrics/target" />
+      <excludeFolder url="file://$MODULE_DIR$/common/nibble/target" />
       <excludeFolder url="file://$MODULE_DIR$/common/proptest_helpers/target" />
       <excludeFolder url="file://$MODULE_DIR$/common/proto_conv/proto_conv_derive/target" />
       <excludeFolder url="file://$MODULE_DIR$/common/proto_conv/target" />

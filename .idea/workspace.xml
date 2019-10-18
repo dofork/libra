@@ -12,11 +12,11 @@
     <cargoProject FILE="$PROJECT_DIR$/Cargo.toml" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="7bc2bde9-8dd7-4c96-a3b9-b2b9f59cae89" name="Default Changelist" comment="merge remote testnet">
+    <list default="true" id="7bc2bde9-8dd7-4c96-a3b9-b2b9f59cae89" name="Default Changelist" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/libra.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/libra.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/client/src/client_front.rs" beforeDir="false" afterPath="$PROJECT_DIR$/client/src/client_front.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/rocket/examples/libra/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/rocket/examples/libra/src/main.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rust-toolchain" beforeDir="false" afterPath="$PROJECT_DIR$/rust-toolchain" afterDir="false" />
     </list>
     <option name="EXCLUDED_CONVERTED_TO_IGNORED" value="true" />
     <option name="SHOW_DIALOG" value="false" />
@@ -37,6 +37,7 @@
   <component name="PropertiesComponent">
     <property name="WebServerToolWindowFactoryState" value="false" />
     <property name="org.rust.cargo.project.model.PROJECT_DISCOVERY" value="true" />
+    <property name="org.rust.hideDetachedFileNotifications/home/dofork/Code/libra/client/src/client_front.rs" value="true" />
     <property name="settings.editor.selected.configurable" value="CPPToolchains" />
   </component>
   <component name="RunDashboard">
@@ -100,7 +101,9 @@
       <workItem from="1568948859830" duration="784000" />
       <workItem from="1568949664667" duration="922000" />
       <workItem from="1571191669499" duration="5757000" />
-      <workItem from="1571209500661" duration="3835000" />
+      <workItem from="1571209500661" duration="5386000" />
+      <workItem from="1571228055032" duration="859000" />
+      <workItem from="1571381615463" duration="2519000" />
     </task>
     <task id="LOCAL-00001" summary="add clion project file">
       <created>1568949620148</created>
@@ -116,7 +119,14 @@
       <option name="project" value="LOCAL" />
       <updated>1571192844393</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="compile it">
+      <created>1571214242199</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1571214242199</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -138,6 +148,7 @@
   <component name="VcsManagerConfiguration">
     <MESSAGE value="add clion project file" />
     <MESSAGE value="merge remote testnet" />
-    <option name="LAST_COMMIT_MESSAGE" value="merge remote testnet" />
+    <MESSAGE value="compile it" />
+    <option name="LAST_COMMIT_MESSAGE" value="compile it" />
   </component>
 </project>

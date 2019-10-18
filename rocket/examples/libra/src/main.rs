@@ -41,6 +41,19 @@ impl FrontController {
         FrontController{client,}
     }
 
+    pub fn generate_mnemonic(&self) -> String
+    {
+        let mut client = self.client.lock().unwrap();
+        client.generate_mnemonic().unwrap()
+    }
+
+
+    pub fn fetch_address(&self,mnemonic:String) -> String
+    {
+        let mut client = self.client.lock().unwrap();
+        client.fetch_address(&mnemonic).unwrap()
+    }
+
     pub fn create_account(&self) -> (String,String)
     {
         let mut client = self.client.lock().unwrap();
@@ -106,6 +119,19 @@ fn mint(controller : State<FrontController> ,receiver_address:String,num_coins:S
     "mint finished".to_string()
 }
 
+#[get("/generate_mnemonic")]
+fn generate_mnemonic(controller : State<FrontController>) -> String
+{
+    controller.generate_mnemonic()
+}
+
+#[get("/fetch_address/<mnemonic_string>")]
+fn fetch_address(controller : State<FrontController> ,mnemonic_string:String) -> String
+{
+    controller.fetch_address(mnemonic_string)
+}
+
+
 #[get("/get_balance/<address>")]
 fn get_balance(controller:State<FrontController>,address:String) -> String
 {
@@ -134,5 +160,5 @@ fn recovery_wallet(
 
 fn main() {
     let controller = FrontController::new();
-    rocket::ignite().manage(controller).mount("/", routes![create_account,get_balance,mint,transfer_coins,recovery_wallet]).launch();
+    rocket::ignite().manage(controller).mount("/", routes![create_account,get_balance,mint,transfer_coins,recovery_wallet,generate_mnemonic,fetch_address]).launch();
 }

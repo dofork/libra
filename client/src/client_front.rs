@@ -236,6 +236,19 @@ impl ClientFront {
             thread::sleep(time::Duration::from_millis(10));
         }
     }
+    /// create mnemonic for user
+    pub fn generate_mnemonic (&mut self) -> Result<String>
+    {
+        let (mnemonic,address_human) = self.create_account().unwrap();
+        Ok(mnemonic)
+    }
+
+
+    /// fetch a pub address of wallet of mnemonic
+    pub fn fetch_address(&mut self,mnemonic_string : &String) -> Result<String>
+    {
+        self.recovery_wallet_v2(mnemonic_string)
+    }
 
     /// create account for user
     pub fn create_account (&mut self) -> Result<(String,String)>
@@ -344,6 +357,18 @@ impl ClientFront {
             }
         }
         Err(format_err!("No wallet maintained for the target accountdata"))
+    }
+
+    /// wallet for mnemonic
+    fn wallet_of_mnemonic(&self,mnemonic:String) -> Result<&WalletLibrary>
+    {
+        for (_i,user) in self.users.iter().enumerate() {
+            let wallet = &user.wallet;
+            if wallet.mnemonic() == mnemonic {
+                return Ok(&wallet)
+            }
+        }
+        Err(format_err!("No wallet maintained for the mnemonic"))
     }
 
     /// Get account state from validator and update status of account if it is cached locally.
