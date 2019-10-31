@@ -13,9 +13,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="7bc2bde9-8dd7-4c96-a3b9-b2b9f59cae89" name="Default Changelist" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/libra.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/libra.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/src/client_front.rs" beforeDir="false" afterPath="$PROJECT_DIR$/client/src/client_front.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/rocket/examples/libra/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/rocket/examples/libra/src/main.rs" afterDir="false" />
     </list>
     <option name="EXCLUDED_CONVERTED_TO_IGNORED" value="true" />
@@ -28,6 +26,11 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="Git.Settings">
+    <option name="PREVIOUS_COMMIT_AUTHORS">
+      <list>
+        <option value="dofork &lt;dofork@github.com&gt;" />
+      </list>
+    </option>
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
   <component name="MacroExpansionManager">
@@ -104,6 +107,7 @@
       <workItem from="1571209500661" duration="5386000" />
       <workItem from="1571228055032" duration="859000" />
       <workItem from="1571381615463" duration="2519000" />
+      <workItem from="1572484159787" duration="1446000" />
     </task>
     <task id="LOCAL-00001" summary="add clion project file">
       <created>1568949620148</created>

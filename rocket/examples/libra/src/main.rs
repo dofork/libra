@@ -15,24 +15,24 @@ use client::{client_front::ClientFront};
 
 use rocket::request::State;
 use std::sync::Mutex;
-
+use std::env;
 //pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct  FrontController {
     client : Mutex<ClientFront>,
 }
 impl FrontController {
-    pub fn new() -> Self{
+    pub fn new(validator_set_file:&String) -> Self{
 
         let host = "ac.testnet.libra.org";
         let port = 8000;
-        let validator_set_file = "/home/dofork/Code/libra/rocket/examples/libra/trusted_peers.config.toml";
+        //let validator_set_file = "/home/dofork/Code/libra/rocket/examples/libra/trusted_peers.config.toml";
 
         let client = Mutex::new(
             ClientFront::new(
                 host,
                 port,
-                &validator_set_file,
+                validator_set_file,
                 &"",//&faucet_account_file,
                 None,//args.faucet_server,
                 None,//args.mnemonic_file,
@@ -159,6 +159,7 @@ fn recovery_wallet(
 }
 
 fn main() {
-    let controller = FrontController::new();
+    let args: Vec<_> = env::args().collect();
+    let controller = FrontController::new(&args[1]);
     rocket::ignite().manage(controller).mount("/", routes![create_account,get_balance,mint,transfer_coins,recovery_wallet,generate_mnemonic,fetch_address]).launch();
 }
